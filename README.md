@@ -1,4 +1,5 @@
 # Source Agent ☤
+<img width="1254" height="1254" alt="image" src="https://github.com/user-attachments/assets/1adba8b5-669f-420b-b108-dce80c61cfa4" />
 
 A self-improving personal **AI agent**, part of the SourceMind suite. Architecture inspired by
 [Nous Research's Hermes Agent](https://github.com/NousResearch/hermes-agent) (MIT) — a tool-using
