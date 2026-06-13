@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Source Agent</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="mark">☤</span>
+        <div class="brand-text">
+          <div class="brand-name">Source<span>Agent</span></div>
+          <div class="brand-sub">self-improving personal agent</div>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <span class="status" id="status"><span class="dot"></span> connecting…</span>
+        <select id="modelSelect" class="model-select" title="Model"></select>
+      </div>
+    </header>
+
+    <div class="main">
+      <aside class="sidebar">
+        <button class="new-btn" id="newChat">＋ New conversation</button>
+
+        <div class="side-section">
+          <div class="side-head">Conversations</div>
+          <div class="conv-list" id="convList"></div>
+        </div>
+
+        <div class="side-section memory">
+          <div class="side-head">
+            Memory
+            <button id="clearMem" title="Clear memory">✕</button>
+          </div>
+          <div class="mem-list" id="memList"></div>
+        </div>
+
+        <div class="side-section workspace">
+          <div class="side-head">Workspace</div>
+          <div class="ws-row">
+            <span class="ws-path" id="wsPath" title="">—</span>
+            <button id="changeWs" title="Change workspace">⋯</button>
+          </div>
+        </div>
+      </aside>
+
+      <section class="chat">
+        <div class="transcript" id="transcript">
+          <div class="empty" id="empty">
+            <div class="empty-mark">☤</div>
+            <h1>Source Agent</h1>
+            <p>A personal AI agent that runs shell commands, edits files, searches the web,
+               and remembers what matters across sessions — all locally via Ollama.</p>
+            <div class="suggest" id="suggest">
+              <button>List the files in my workspace</button>
+              <button>Create a Python hello-world and run it</button>
+              <button>Search the web for the latest on AI agents</button>
+            </div>
+          </div>
+        </div>
+        <div class="composer">
+          <div class="composer-box">
+            <textarea id="input" rows="1" placeholder="Ask Source Agent to do something…"></textarea>
+            <button id="send" title="Send">↑</button>
+          </div>
+          <div class="composer-foot" id="wsFoot">workspace: —</div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div class="modal" id="wsModal" hidden>
+    <div class="modal-card">
+      <div class="modal-head">Choose workspace folder</div>
+      <div class="modal-path" id="modalPath"></div>
+      <div class="modal-list" id="modalList"></div>
+      <div class="modal-foot">
+        <button id="modalUp">⬆ Up</button>
+        <span class="spacer"></span>
+        <button id="modalCancel">Cancel</button>
+        <button id="modalOpen" class="primary">Use this folder</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>

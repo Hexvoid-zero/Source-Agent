@@ -1,0 +1,6 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+httpx>=0.27
+pydantic>=2.7
+# The desktop window uses Edge/Chrome --app mode (chromeless), so no GUI deps
+# are required. Edge ships with Windows 10/11.
