@@ -16,7 +16,7 @@ async function api(path, opts) {
 }
 
 const S = { cid: null, busy: false };
-const TOOL_ICON = { shell: "›_", read_file: "📄", write_file: "✎", list_dir: "🗂", web_search: "🌐" };
+const TOOL_ICON = { shell: "›_", read_file: "📄", write_file: "✎", list_dir: "🗂", web_search: "🌐", mcp_tool: "🔌" };
 
 function toast(m, ms) { const t = $("toast"); t.textContent = m; t.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(() => (t.hidden = true), ms || 2400); }
 
@@ -39,7 +39,7 @@ async function boot() {
     s.className = "status " + (h.llm ? "on" : "off");
     s.innerHTML = `<span class="dot"></span> ${h.llm ? (h.model || "ready") : "Ollama offline"}`;
   } catch (e) { $("status").innerHTML = `<span class="dot"></span> backend offline`; }
-  await Promise.all([loadModels(), loadConversations(), loadMemory(), loadWorkspace()]);
+  await Promise.all([loadModels(), loadConversations(), loadMemory(), loadWorkspace(), loadConnectors(), loadSkills(), loadRoutines()]);
 }
 async function loadModels() {
   try {
@@ -80,6 +80,229 @@ async function loadWorkspace() {
   $("wsPath").textContent = w.path; $("wsPath").title = w.path;
   $("wsFoot").textContent = "workspace: " + w.path;
 }
+
+// --------------------------------------------------------------------------- connectors
+async function loadConnectors() {
+  const conns = await api("/connectors").catch(() => []);
+  const el = $("connList2"); el.innerHTML = "";
+  if (!conns.length) {
+    el.innerHTML = '<div class="conn-empty">No connectors. Click ＋ to add an MCP server.</div>';
+    return;
+  }
+  for (const c of conns) {
+    const row = document.createElement("div");
+    row.className = "conn-item" + (c.enabled ? "" : " disabled");
+    row.innerHTML = `<div class="conn-info"><span class="conn-dot ${c.enabled ? 'on' : 'off'}"></span><span class="conn-name">${c.name}</span><span class="conn-tools">${c.tool_count || '?'} tools</span></div><div class="conn-actions"><button class="conn-toggle" title="${c.enabled ? 'Disable' : 'Enable'}">${c.enabled ? '●' : '○'}</button><button class="conn-rm" title="Remove">✕</button></div>`;
+    row.querySelector(".conn-toggle").onclick = async () => { await api(`/connectors/${c.id}/toggle`, { method: "PUT" }); loadConnectors(); };
+    row.querySelector(".conn-rm").onclick = async () => { if (confirm(`Remove connector "${c.name}"?`)) { await api(`/connectors/${c.id}`, { method: "DELETE" }); loadConnectors(); toast("Connector removed"); } };
+    el.appendChild(row);
+  }
+}
+async function addConnector() {
+  const name = $("connName").value.trim();
+  const url = $("connUrl").value.trim();
+  if (!name || !url) { toast("Name and URL are required"); return; }
+  try {
+    await api("/connectors", { method: "POST", body: JSON.stringify({ name, url }) });
+    $("connModal").hidden = true;
+    $("connName").value = ""; $("connUrl").value = "";
+    loadConnectors();
+    toast("Connector added successfully");
+  } catch (e) {
+    toast("Failed: " + e.message, 4000);
+  }
+}
+
+// --------------------------------------------------------------------------- skills
+async function loadSkills() {
+  const skills = await api("/skills").catch(() => []);
+  const el = $("skillList"); el.innerHTML = "";
+  if (!skills.length) {
+    el.innerHTML = '<div class="skill-empty">No skills installed. Click ＋ to add one.</div>';
+    return;
+  }
+  for (const s of skills) {
+    const row = document.createElement("div");
+    row.className = "skill-item" + (s.enabled ? "" : " disabled");
+    row.innerHTML = `<div class="skill-info"><span class="skill-icon">⚡</span><span class="skill-name">${s.name}</span></div><div class="skill-desc">${s.description || ''}</div><div class="skill-actions"><button class="skill-toggle" title="${s.enabled ? 'Disable' : 'Enable'}">${s.enabled ? '●' : '○'}</button><button class="skill-rm" title="Remove">✕</button></div>`;
+    row.querySelector(".skill-toggle").onclick = async () => { await api(`/skills/${s.folder}/toggle`, { method: "PUT" }); loadSkills(); };
+    row.querySelector(".skill-rm").onclick = async () => { if (confirm(`Remove skill "${s.name}"?`)) { await api(`/skills/${s.folder}`, { method: "DELETE" }); loadSkills(); toast("Skill removed"); } };
+    el.appendChild(row);
+  }
+}
+async function apiUpload(path, file) {
+  const formData = new FormData();
+  formData.append("file", file);
+  const res = await rfetch("/api" + path, {
+    method: "POST",
+    body: formData
+  });
+  if (!res.ok) throw new Error((await res.text()) || res.statusText);
+  return res.json();
+}
+
+let skillInputMode = "paste";
+let selectedSkillFile = null;
+
+async function installSkill() {
+  if (skillInputMode === "paste") {
+    const name = $("skillName").value.trim();
+    const content = $("skillContent").value.trim();
+    if (!name || !content) { toast("Name and content are required"); return; }
+    try {
+      await api("/skills/install", { method: "POST", body: JSON.stringify({ name, content }) });
+      closeSkillModal();
+      loadSkills();
+      toast("Skill installed and enabled");
+    } catch (e) {
+      toast("Failed: " + e.message, 4000);
+    }
+  } else {
+    if (!selectedSkillFile) { toast("Please select or drop a SKILL.md file"); return; }
+    try {
+      await apiUpload("/skills/upload", selectedSkillFile);
+      closeSkillModal();
+      loadSkills();
+      toast("Skill uploaded and enabled");
+    } catch (e) {
+      toast("Failed: " + e.message, 4000);
+    }
+  }
+}
+
+function closeSkillModal() {
+  $("skillModal").hidden = true;
+  $("skillName").value = "";
+  $("skillContent").value = "";
+  const fileInput = $("skillFileInput");
+  if (fileInput) fileInput.value = "";
+  selectedSkillFile = null;
+  const fileInfo = $("skillFileInfo");
+  if (fileInfo) fileInfo.hidden = true;
+  // reset to paste tab
+  const btnPaste = $("btnSkillPaste");
+  if (btnPaste) {
+    btnPaste.classList.add("active");
+    const btnUpload = $("btnSkillUpload");
+    if (btnUpload) btnUpload.classList.remove("active");
+    $("skillPasteSection").hidden = false;
+    $("skillUploadSection").hidden = true;
+    skillInputMode = "paste";
+  }
+}
+
+// --------------------------------------------------------------------------- routines
+async function loadRoutines() {
+  const routines = await api("/routines").catch(() => []);
+  const el = $("routineList"); el.innerHTML = "";
+  if (!routines.length) {
+    el.innerHTML = '<div class="routine-empty">No routines created. Click ＋ to add one.</div>';
+    return;
+  }
+  for (const r of routines) {
+    const row = document.createElement("div");
+    row.className = "routine-item" + (r.enabled ? "" : " disabled");
+    
+    let triggerDesc = "Manual Only";
+    if (r.trigger.type === "scheduled") {
+      triggerDesc = `Every ${r.trigger.interval_minutes}m`;
+    }
+    
+    let statusText = "Never run";
+    if (r.running) {
+      statusText = "Running...";
+    } else if (r.last_run) {
+      const date = new Date(r.last_run * 1000);
+      statusText = "Last: " + date.toLocaleTimeString();
+    }
+    
+    row.innerHTML = `<div class="routine-info">` +
+      `<span class="routine-icon">${r.running ? '⏳' : '⚙️'}</span>` +
+      `<span class="routine-name" id="name-${r.id}">${r.name}</span>` +
+      `</div>` +
+      `<div class="routine-meta">` +
+      `<span>${triggerDesc}</span>` +
+      `<span>${statusText}</span>` +
+      `</div>` +
+      `<div class="routine-actions">` +
+      `<button class="routine-run" title="Run now">▶</button>` +
+      `<button class="routine-toggle" title="${r.enabled ? 'Disable' : 'Enable'}">${r.enabled ? '●' : '○'}</button>` +
+      `<button class="routine-rm" title="Delete">✕</button>` +
+      `</div>`;
+      
+    if (r.last_conv_id) {
+      const nameEl = row.querySelector(`#name-${r.id}`);
+      nameEl.onclick = () => openConversation(r.last_conv_id);
+    }
+    
+    row.querySelector(".routine-run").onclick = async () => {
+      try {
+        await api(`/routines/${r.id}/run`, { method: "POST" });
+        toast("Routine started");
+        loadRoutines();
+      } catch (e) {
+        toast("Run failed: " + e.message);
+      }
+    };
+    
+    row.querySelector(".routine-toggle").onclick = async () => {
+      await api(`/routines/${r.id}/toggle`, { method: "PUT" });
+      loadRoutines();
+    };
+    
+    row.querySelector(".routine-rm").onclick = async () => {
+      if (confirm(`Delete routine "${r.name}"?`)) {
+        await api(`/routines/${r.id}`, { method: "DELETE" });
+        loadRoutines();
+        toast("Routine deleted");
+      }
+    };
+    
+    el.appendChild(row);
+  }
+}
+
+async function createRoutine() {
+  const name = $("routineName").value.trim();
+  const prompt = $("routinePrompt").value.trim();
+  const workspace = $("routineWorkspace").value.trim();
+  const trigger_type = $("routineTriggerType").value;
+  const interval_minutes = parseInt($("routineInterval").value) || 60;
+  
+  if (!name || !prompt || !workspace) {
+    toast("Name, prompt, and workspace folder are required");
+    return;
+  }
+  
+  try {
+    await api("/routines", {
+      method: "POST",
+      body: JSON.stringify({
+        name,
+        prompt,
+        workspace,
+        trigger_type,
+        interval_minutes
+      })
+    });
+    closeRoutineModal();
+    loadRoutines();
+    toast("Routine created successfully");
+  } catch (e) {
+    toast("Failed: " + e.message, 4000);
+  }
+}
+
+function closeRoutineModal() {
+  $("routineModal").hidden = true;
+  $("routineName").value = "";
+  $("routinePrompt").value = "";
+  $("routineWorkspace").value = "";
+  $("routineTriggerType").value = "manual";
+  $("routineInterval").value = "60";
+  $("routineIntervalLabel").hidden = true;
+}
+
 
 // --------------------------------------------------------------------------- conversations
 function newChat() { S.cid = null; $("transcript").innerHTML = ""; showEmpty(true); loadConversations(); }
@@ -165,7 +388,7 @@ async function send(text) {
   };
 
   try {
-    const res = await rfetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text, conversation_id: S.cid }) }, 2);
+    const res = await rfetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text, conversation_id: S.cid, model: $("modelSelect").value }) }, 2);
     if (!res.ok || !res.body) throw new Error(await res.text());
     const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = "";
     for (;;) {
@@ -214,5 +437,100 @@ document.addEventListener("DOMContentLoaded", () => {
   $("modalCancel").onclick = () => ($("wsModal").hidden = true);
   $("modalOpen").onclick = chooseWs;
   const sug = $("suggest"); if (sug) sug.querySelectorAll("button").forEach((b) => (b.onclick = () => send(b.textContent)));
+  $("modelSelect").onchange = async () => {
+    const val = $("modelSelect").value;
+    try {
+      await api("/models/active", { method: "POST", body: JSON.stringify({ name: val }) });
+      toast("Active model set to " + val);
+    } catch (e) {
+      toast("Failed to set active model");
+    }
+  };
+  // Connectors
+  $("addConn").onclick = () => ($("connModal").hidden = false);
+  $("connCancel").onclick = () => ($("connModal").hidden = true);
+  $("connSave").onclick = addConnector;
+  // Skills
+  $("addSkill").onclick = () => ($("skillModal").hidden = false);
+  $("skillCancel").onclick = closeSkillModal;
+  $("skillSave").onclick = installSkill;
+
+  // Tabs
+  const btnPaste = $("btnSkillPaste");
+  const btnUpload = $("btnSkillUpload");
+  const pasteSec = $("skillPasteSection");
+  const uploadSec = $("skillUploadSection");
+  if (btnPaste && btnUpload) {
+    btnPaste.onclick = () => {
+      skillInputMode = "paste";
+      btnPaste.classList.add("active");
+      btnUpload.classList.remove("active");
+      pasteSec.hidden = false;
+      uploadSec.hidden = true;
+    };
+    btnUpload.onclick = () => {
+      skillInputMode = "upload";
+      btnUpload.classList.add("active");
+      btnPaste.classList.remove("active");
+      pasteSec.hidden = true;
+      uploadSec.hidden = false;
+    };
+  }
+
+  // Dropzone
+  const fileInput = $("skillFileInput");
+  const dropzone = $("skillDropzone");
+  const fileInfo = $("skillFileInfo");
+  if (dropzone && fileInput) {
+    dropzone.onclick = () => fileInput.click();
+    fileInput.onchange = (e) => {
+      if (e.target.files.length > 0) {
+        handleSelectedSkillFile(e.target.files[0]);
+      }
+    };
+
+    dropzone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      dropzone.classList.add("dragover");
+    });
+    dropzone.addEventListener("dragleave", () => {
+      dropzone.classList.remove("dragover");
+    });
+    dropzone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      dropzone.classList.remove("dragover");
+      if (e.dataTransfer.files.length > 0) {
+        handleSelectedSkillFile(e.dataTransfer.files[0]);
+      }
+    });
+  }
+
+  function handleSelectedSkillFile(file) {
+    if (!file.name.endsWith(".md")) {
+      toast("Please select a .md file");
+      return;
+    }
+    selectedSkillFile = file;
+    fileInfo.textContent = `Selected: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+    fileInfo.hidden = false;
+  }
+
+  // Routines
+  $("addRoutine").onclick = () => {
+    $("routineModal").hidden = false;
+    const activeWs = $("wsPath").textContent;
+    if (activeWs && activeWs !== "—") {
+      $("routineWorkspace").value = activeWs;
+    }
+  };
+  $("routineCancel").onclick = closeRoutineModal;
+  $("routineSave").onclick = createRoutine;
+  
+  $("routineTriggerType").onchange = (e) => {
+    $("routineIntervalLabel").hidden = (e.target.value !== "scheduled");
+  };
+  
+  setInterval(loadRoutines, 5000);
+
   boot();
 });

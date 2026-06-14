@@ -39,6 +39,30 @@
           <div class="mem-list" id="memList"></div>
         </div>
 
+        <div class="side-section connectors">
+          <div class="side-head">
+            Connectors
+            <button id="addConn" title="Add MCP connector">＋</button>
+          </div>
+          <div class="conn-list" id="connList2"></div>
+        </div>
+
+        <div class="side-section skills">
+          <div class="side-head">
+            Skills
+            <button id="addSkill" title="Install skill">＋</button>
+          </div>
+          <div class="skill-list" id="skillList"></div>
+        </div>
+
+        <div class="side-section routines">
+          <div class="side-head">
+            Routines
+            <button id="addRoutine" title="Create routine">＋</button>
+          </div>
+          <div class="routine-list" id="routineList"></div>
+        </div>
+
         <div class="side-section workspace">
           <div class="side-head">Workspace</div>
           <div class="ws-row">
@@ -83,6 +107,74 @@
         <span class="spacer"></span>
         <button id="modalCancel">Cancel</button>
         <button id="modalOpen" class="primary">Use this folder</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="connModal" hidden>
+    <div class="modal-card modal-sm">
+      <div class="modal-head">Add MCP Connector</div>
+      <div class="modal-body">
+        <label>Name<input id="connName" placeholder="e.g. My MCP Server" /></label>
+        <label>Server URL<input id="connUrl" placeholder="http://localhost:3000/mcp" /></label>
+      </div>
+      <div class="modal-foot">
+        <span class="spacer"></span>
+        <button id="connCancel">Cancel</button>
+        <button id="connSave" class="primary">Connect</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="skillModal" hidden>
+    <div class="modal-card">
+      <div class="modal-head">Install Skill</div>
+      <div class="modal-body">
+        <div class="skill-input-toggle">
+          <button id="btnSkillPaste" class="active">Paste Content</button>
+          <button id="btnSkillUpload">Upload File</button>
+        </div>
+        <div id="skillPasteSection">
+          <label>Skill Name<input id="skillName" placeholder="e.g. code-review" /></label>
+          <label>SKILL.md Content<textarea id="skillContent" rows="12" placeholder="---&#10;name: My Skill&#10;description: What this skill does&#10;---&#10;&#10;Instructions for the agent…"></textarea></label>
+        </div>
+        <div id="skillUploadSection" hidden>
+          <label>Select SKILL.md File
+            <div class="file-dropzone" id="skillDropzone">
+              <span class="dropzone-text">Drag & drop your SKILL.md file here or click to browse</span>
+              <input type="file" id="skillFileInput" accept=".md" style="display:none;" />
+            </div>
+          </label>
+          <div id="skillFileInfo" style="margin-top: 10px; font-size: 0.9em; color: var(--muted);" hidden></div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <span class="spacer"></span>
+        <button id="skillCancel">Cancel</button>
+        <button id="skillSave" class="primary">Install</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="routineModal" hidden>
+    <div class="modal-card modal-sm">
+      <div class="modal-head">Create Routine</div>
+      <div class="modal-body">
+        <label>Routine Name<input id="routineName" placeholder="e.g. Daily Cleanup" /></label>
+        <label>Instruction / Prompt<textarea id="routinePrompt" rows="4" placeholder="What should the agent do? (e.g. check logs, run build)"></textarea></label>
+        <label>Workspace Folder<input id="routineWorkspace" placeholder="e.g. C:\project" /></label>
+        <label>Trigger Type
+          <select id="routineTriggerType" class="model-select" style="max-width:100%;">
+            <option value="manual">Manual Only</option>
+            <option value="scheduled">Scheduled Interval</option>
+          </select>
+        </label>
+        <label id="routineIntervalLabel" hidden>Interval (minutes)<input type="number" id="routineInterval" value="60" min="5" /></label>
+      </div>
+      <div class="modal-foot">
+        <span class="spacer"></span>
+        <button id="routineCancel">Cancel</button>
+        <button id="routineSave" class="primary">Create</button>
       </div>
     </div>
   </div>
