@@ -18,17 +18,34 @@
       </div>
       <div class="topbar-right">
         <span class="status" id="status"><span class="dot"></span> connecting…</span>
+        <button id="jarvisBtn" class="icon-btn jarvis-btn" title="J.A.R.V.I.S hands-free voice mode">🎙 JARVIS</button>
+        <button id="speakToggle" class="icon-btn" title="Speak replies aloud">🔊</button>
+        <button id="canvasBtn" class="icon-btn" title="Open the live canvas">🎨</button>
         <select id="modelSelect" class="model-select" title="Model"></select>
       </div>
     </header>
 
     <div class="main">
       <aside class="sidebar">
-        <button class="new-btn" id="newChat">＋ New conversation</button>
+        <div id="normalSidebarTop">
+          <button class="new-btn" id="newChat">＋ New conversation</button>
 
-        <div class="side-section">
-          <div class="side-head">Conversations</div>
-          <div class="conv-list" id="convList"></div>
+          <input id="searchBox" class="search-box" placeholder="🔍 Search all conversations…" autocomplete="off" />
+          <div class="search-results" id="searchResults" hidden></div>
+
+          <div class="side-section">
+            <div class="side-head">Conversations</div>
+            <div class="conv-list" id="convList"></div>
+          </div>
+        </div>
+
+        <div class="side-section mini-chat-section" id="miniChatSection" hidden>
+          <div class="side-head">Active Chat (J.A.R.V.I.S)</div>
+          <div class="mini-chat-transcript" id="miniChatTranscript"></div>
+          <div class="mini-chat-composer">
+            <textarea id="miniInput" rows="1" placeholder="Type to Jarvis..."></textarea>
+            <button id="miniSend" title="Send">↑</button>
+          </div>
         </div>
 
         <div class="side-section memory">
@@ -37,6 +54,22 @@
             <button id="clearMem" title="Clear memory">✕</button>
           </div>
           <div class="mem-list" id="memList"></div>
+        </div>
+
+        <div class="side-section coder-section" id="coderSection">
+          <div class="side-head">Source Agent Coder</div>
+          <button class="coder-btn" id="btnCoderChats">
+            <span class="icon">💻</span>
+            <span class="label">Coder Chats</span>
+          </button>
+        </div>
+
+        <div class="side-section remote-ws-section" id="remoteWsSection">
+          <div class="side-head">Remote Workspace</div>
+          <button class="coder-btn" id="btnRemoteWs">
+            <span class="icon">🛰️</span>
+            <span class="label">Source 1 Workers</span>
+          </button>
         </div>
 
         <div class="side-section connectors">
@@ -72,7 +105,7 @@
         </div>
       </aside>
 
-      <section class="chat">
+      <section class="chat" id="chatPage">
         <div class="transcript" id="transcript">
           <div class="empty" id="empty">
             <div class="empty-mark">☤</div>
@@ -89,9 +122,95 @@
         <div class="composer">
           <div class="composer-box">
             <textarea id="input" rows="1" placeholder="Ask Source Agent to do something…"></textarea>
+            <button id="micBtn" class="mic-btn" title="Voice input (speak)">🎤</button>
             <button id="send" title="Send">↑</button>
           </div>
           <div class="composer-foot" id="wsFoot">workspace: —</div>
+        </div>
+      </section>
+
+      <!-- JARVIS Interactive Holographic Sphere Page -->
+      <section class="jarvis-container" id="jarvisContainer" hidden>
+        <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+          <filter id="jarvisPlasma">
+            <feTurbulence type="fractalNoise" baseFrequency="0.012 0.018" numOctaves="3" seed="7" result="n">
+              <animate attributeName="baseFrequency" dur="14s" values="0.012 0.018;0.02 0.012;0.012 0.018" repeatCount="indefinite" />
+            </feTurbulence>
+            <feDisplacementMap in="SourceGraphic" in2="n" scale="46" xChannelSelector="R" yChannelSelector="G" />
+          </filter>
+        </svg>
+        <div class="jarvis-sphere-wrapper" id="jarvisSphereWrap">
+          <div class="jarvis-glow"></div>
+          <div class="jarvis-sphere" id="jarvisSphere">
+            <div class="plasma"></div>
+            <div class="plasma plasma-2"></div>
+            <div class="core"></div>
+            <div class="rim"></div>
+          </div>
+          <div class="jarvis-ring ring-1"></div>
+          <div class="jarvis-ring ring-2"></div>
+        </div>
+        <div class="jarvis-status-text" id="jarvisStatusText">Jarvis Offline</div>
+        <div class="jarvis-mic-selector-wrap" style="margin-top: 15px; display: flex; flex-direction: column; align-items: center; gap: 8px; z-index: 10;">
+          <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:center;">
+            <label class="jarvis-field">
+              <span class="jarvis-field-label">🎙 Mic</span>
+              <select id="jarvisMicSelect" class="jarvis-select"></select>
+            </label>
+            <label class="jarvis-field">
+              <span class="jarvis-field-label">🔊 Voice</span>
+              <select id="jarvisVoiceSelect" class="jarvis-select"></select>
+            </label>
+          </div>
+          <span style="font-size: 10px; color: var(--muted); text-align: center; max-width: 340px;">
+            Tip: Set your headphone mic as the default input device in Windows settings if not recognized.
+          </span>
+        </div>
+      </section>
+
+      <!-- Remote Workspace — live view of the workers hired in Source Worker ("Source 1") -->
+      <section class="remote-ws-page" id="remoteWsPage" hidden>
+        <div class="rws-head">
+          <div>
+            <h2>Remote Workspace</h2>
+            <p>Live activity of the workers you set up in <strong>Source Worker</strong>.</p>
+          </div>
+          <div class="rws-head-actions">
+            <span class="rws-refresh-dot" id="rwsRefreshDot" title="Auto-refreshing"></span>
+            <button class="rws-refresh-btn" id="rwsRefresh" title="Refresh now">↻ Refresh</button>
+          </div>
+        </div>
+        <div class="rws-body" id="rwsBody">
+          <div class="rws-empty">Connecting to Source Worker…</div>
+        </div>
+      </section>
+
+      <!-- Source Agent Coder Page -->
+      <section class="coder-page" id="coderPage" hidden>
+        <div class="coder-sidebar">
+          <div class="coder-sidebar-head">
+            <h3>IDE Chats</h3>
+            <p>Using Source Agent model</p>
+          </div>
+          <div class="coder-list" id="coderList">
+            <!-- Loaded conversations listed here -->
+          </div>
+        </div>
+        <div class="coder-content">
+          <div class="coder-empty" id="coderEmpty">
+            <div class="empty-mark">💻</div>
+            <h2>Source Agent Coder</h2>
+            <p>Select an IDE conversation from the list to view the full interaction history.</p>
+          </div>
+          <div class="coder-transcript-wrap" id="coderTranscriptWrap" hidden>
+            <div class="coder-transcript-header">
+              <h2 id="coderChatTitle">Conversation Name</h2>
+              <div class="coder-transcript-meta" id="coderChatMeta">Last updated: -</div>
+            </div>
+            <div class="coder-transcript" id="coderTranscript">
+              <!-- Rendered messages -->
+            </div>
+          </div>
         </div>
       </section>
     </div>
@@ -180,6 +299,536 @@
   </div>
 
   <div class="toast" id="toast" hidden></div>
+
+  <!-- OpenClaw-style live canvas panel -->
+  <div class="canvas-overlay" id="canvasOverlay" hidden>
+    <div class="canvas-frame-wrap">
+      <div class="canvas-bar"><span>🎨 Live Canvas</span><button id="canvasClose" title="Close">✕</button></div>
+      <iframe id="canvasFrame" sandbox="allow-scripts" title="Live canvas"></iframe>
+    </div>
+  </div>
+
   <script src="app.js"></script>
+  <script>
+  // ---- Hermes + OpenClaw additions: voice (speak/listen), live canvas, session search ----
+  (function () {
+    const byId = (id) => document.getElementById(id);
+    let jarvis = false;
+
+    // --- Voice: speak replies (TTS) via MutationObserver on the transcript ---
+    let speakOn = false;
+    const synth = window.speechSynthesis;
+    function speak(text) {
+      if (!speakOn || !synth || !text) return;
+      try { synth.cancel(); const u = new SpeechSynthesisUtterance(text.slice(0, 600)); u.rate = 1.05; synth.speak(u); } catch (e) {}
+    }
+
+    // --- JARVIS voice selection — prefer natural (neural) voices over robotic SAPI ones ---
+    let jarvisVoices = [];
+    let jarvisVoice = null;
+    function rankVoice(v) {
+      const n = (v.name + " " + (v.voiceURI || "")).toLowerCase();
+      let s = 0;
+      if (/natural|neural/.test(n)) s += 100;        // MS "… Online (Natural)" — best quality
+      if (/google/.test(n)) s += 60;                  // Chrome's Google voices
+      if (/(aria|jenny|guy|sonia|ryan|libby|michelle|eric|christopher|roger|ana)/.test(n)) s += 40;
+      if (/(samantha|daniel|karen|moira|tessa|alex|serena)/.test(n)) s += 35; // Apple
+      if (/(zira|david|mark|hazel|susan)/.test(n)) s += 8;  // legacy MS SAPI (robotic) — last resort
+      if (/^en[-_]?(us|gb|au)/i.test(v.lang)) s += 8;
+      if (/en/i.test(v.lang)) s += 4;
+      return s;
+    }
+    function loadJarvisVoices() {
+      if (!synth) return;
+      const all = synth.getVoices() || [];
+      jarvisVoices = all.filter(v => /en/i.test(v.lang)).sort((a, b) => rankVoice(b) - rankVoice(a));
+      if (!jarvisVoices.length) jarvisVoices = all.slice();
+      const saved = localStorage.getItem("jarvisVoiceURI");
+      jarvisVoice = jarvisVoices.find(v => v.voiceURI === saved) || jarvisVoices[0] || null;
+      const sel = byId("jarvisVoiceSelect");
+      if (sel && jarvisVoices.length) {
+        sel.innerHTML = jarvisVoices.map(v =>
+          `<option value="${v.voiceURI}">${v.name.replace(/Microsoft |Google |Online |\(Natural\)/g, "").trim()} · ${v.lang}</option>`
+        ).join("");
+        if (jarvisVoice) sel.value = jarvisVoice.voiceURI;
+        sel.onchange = () => {
+          jarvisVoice = jarvisVoices.find(v => v.voiceURI === sel.value) || jarvisVoice;
+          if (!jarvisVoice) return;
+          localStorage.setItem("jarvisVoiceURI", jarvisVoice.voiceURI);
+          try {
+            synth.cancel();
+            const u = new SpeechSynthesisUtterance("Voice set. " + jarvisVoice.name.split(/[ (]/)[0] + " online.");
+            u.voice = jarvisVoice; u.rate = 0.98; u.pitch = 1.0;
+            synth.speak(u);
+          } catch (e) {}
+        };
+      }
+    }
+    if (synth) {
+      loadJarvisVoices();
+      synth.onvoiceschanged = loadJarvisVoices;   // voices load async on first paint
+    }
+
+    // --- JARVIS sphere reactive state (idle / listening / thinking / speaking) ---
+    function setJarvisState(s) {
+      const w = byId("jarvisSphereWrap");
+      if (!w) return;
+      w.classList.remove("is-idle", "is-listening", "is-thinking", "is-speaking");
+      w.classList.add("is-" + s);
+    }
+    const speakBtn = byId("speakToggle");
+    if (speakBtn) speakBtn.onclick = () => {
+      speakOn = !speakOn; speakBtn.classList.toggle("on", speakOn);
+      if (!speakOn && synth) synth.cancel();
+      if (window.toast) toast(speakOn ? "Speaking replies aloud" : "Voice output off");
+    };
+
+    // Sync Mini Chat transcript
+    const tr = byId("transcript");
+    function syncMiniChat() {
+      const miniTr = byId("miniChatTranscript");
+      if (!miniTr || !tr) return;
+      miniTr.innerHTML = "";
+      const turns = tr.querySelectorAll(".turn");
+      turns.forEach((turn) => {
+        const clone = turn.cloneNode(true);
+        miniTr.appendChild(clone);
+      });
+      miniTr.scrollTop = miniTr.scrollHeight;
+    }
+
+    // watch for finished assistant messages and speak the latest / sync mini-chat
+    if (tr && "MutationObserver" in window) {
+      let lastSpoken = "";
+      new MutationObserver(() => {
+        if (jarvis) {
+          syncMiniChat();
+        }
+        if (!speakOn) return;
+        const nodes = tr.querySelectorAll(".assistant");
+        const last = nodes[nodes.length - 1];
+        if (last && last.innerText && last.innerText !== lastSpoken) { lastSpoken = last.innerText; speak(last.innerText); }
+      }).observe(tr, { childList: true, subtree: true });
+    }
+
+    // --- Voice: listen (STT) via Web Speech API ---
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const micBtn = byId("micBtn");
+    if (micBtn) {
+      if (!SR) { micBtn.style.display = "none"; }
+      else {
+        let rec = null, listening = false;
+        micBtn.onclick = () => {
+          if (listening) { rec && rec.stop(); return; }
+          rec = new SR(); rec.lang = "en-US"; rec.interimResults = true; rec.continuous = false;
+          const inp = byId("input");
+          rec.onstart = () => { listening = true; micBtn.classList.add("on"); };
+          rec.onend = () => { listening = false; micBtn.classList.remove("on"); };
+          rec.onerror = () => { listening = false; micBtn.classList.remove("on"); };
+          rec.onresult = (e) => {
+            let t = ""; for (let i = 0; i < e.results.length; i++) t += e.results[i][0].transcript;
+            if (inp) { inp.value = t; inp.dispatchEvent(new Event("input")); }
+          };
+          rec.start();
+        };
+      }
+    }
+
+    // --- Live canvas panel ---
+    function openCanvas() {
+      const cid = (window.S && window.S.cid) || (typeof S !== "undefined" && S.cid);
+      if (!cid) { if (window.toast) toast("Open a conversation first"); return; }
+      byId("canvasFrame").src = "/api/conversations/" + cid + "/canvas?t=" + Date.now();
+      byId("canvasOverlay").hidden = false;
+    }
+    if (byId("canvasBtn")) byId("canvasBtn").onclick = openCanvas;
+    if (byId("canvasClose")) byId("canvasClose").onclick = () => { byId("canvasOverlay").hidden = true; byId("canvasFrame").src = "about:blank"; };
+
+    // --- Session search ---
+    const sb = byId("searchBox"), sr = byId("searchResults");
+    let setT = null;
+    if (sb) sb.addEventListener("input", () => {
+      clearTimeout(setT);
+      const q = sb.value.trim();
+      if (!q) { sr.hidden = true; sr.innerHTML = ""; return; }
+      setT = setTimeout(async () => {
+        try {
+          const hits = await fetch("/api/search?q=" + encodeURIComponent(q)).then((r) => r.json());
+          sr.innerHTML = hits.length ? "" : '<div class="sr-empty">No matches</div>';
+          hits.forEach((h) => {
+            const d = document.createElement("div"); d.className = "sr-item";
+            d.innerHTML = `<div class="sr-title">${h.title}</div><div class="sr-snip">${(h.snippet || "").replace(/</g, "&lt;")}</div>`;
+            d.onclick = () => { sr.hidden = true; sb.value = ""; if (typeof openConversation === "function") openConversation(h.id); };
+            sr.appendChild(d);
+          });
+          sr.hidden = false;
+        } catch (e) {}
+      }, 250);
+    });
+
+    // --- J.A.R.V.I.S hands-free voice mode (talk -> it runs the task -> replies in its own voice -> re-listens) ---
+    const jarvisBtn = byId("jarvisBtn");
+    if (jarvisBtn && SR) {
+      let jrec = null, jListening = false, stabilizeT = null;
+
+      function finalText(node) {
+        if (!node) return "";
+        const c = node.cloneNode(true);
+        c.querySelectorAll(".step, .step-think, .step-mem, .tool, .working").forEach((e) => e.remove());
+        return c.innerText.trim();
+      }
+      function jspeak(text, after) {
+        if (!synth || !text) { after && after(); return; }
+        try {
+          synth.cancel();
+          const u = new SpeechSynthesisUtterance(text.slice(0, 1200));
+          if (jarvisVoice) u.voice = jarvisVoice;
+          // Natural prosody: a touch slower than default + neutral pitch reads far less robotic
+          u.rate = 0.98; u.pitch = 1.0; u.volume = 1.0;
+          u.onstart = () => { byId("jarvisStatusText").textContent = "Speaking..."; setJarvisState("speaking"); };
+          u.onend = () => { byId("jarvisStatusText").textContent = "Awaiting command..."; setJarvisState("idle"); after && after(); };
+          u.onerror = () => { byId("jarvisStatusText").textContent = "Awaiting command..."; setJarvisState("idle"); after && after(); };
+          synth.speak(u);
+        } catch (e) { byId("jarvisStatusText").textContent = "Awaiting command..."; setJarvisState("idle"); after && after(); }
+      }
+      let jTimeout = null;
+      function startListen() {
+        if (!jarvis || jListening) return;
+        clearTimeout(jTimeout);
+        try {
+          jrec = new SR(); jrec.lang = "en-US"; jrec.interimResults = false; jrec.continuous = false;
+          jrec.onstart = () => { jListening = true; jarvisBtn.classList.add("listening"); byId("jarvisStatusText").textContent = "Listening..."; setJarvisState("listening"); };
+          jrec.onend = () => {
+            jListening = false;
+            jarvisBtn.classList.remove("listening");
+            if (jarvis) {
+              if (byId("jarvisStatusText").textContent === "Listening...") {
+                byId("jarvisStatusText").textContent = "Awaiting command...";
+              }
+              if (byId("jarvisStatusText").textContent === "Awaiting command...") {
+                clearTimeout(jTimeout);
+                jTimeout = setTimeout(startListen, 400);
+              }
+            }
+          };
+          jrec.onerror = (e) => {
+            jListening = false;
+            jarvisBtn.classList.remove("listening");
+            if (jarvis) {
+              if (byId("jarvisStatusText").textContent === "Listening...") {
+                byId("jarvisStatusText").textContent = "Awaiting command...";
+              }
+              clearTimeout(jTimeout);
+              jTimeout = setTimeout(startListen, 1000);
+            }
+          };
+          jrec.onresult = (e) => {
+            let t = ""; for (let i = 0; i < e.results.length; i++) t += e.results[i][0].transcript;
+            t = t.trim();
+            if (t) submit(t);
+          };
+          jrec.start();
+        } catch (e) {}
+      }
+      function submit(text) {
+        byId("jarvisStatusText").textContent = "Processing..."; setJarvisState("thinking");
+        const i = byId("input"); if (!i) return;
+        i.value = text; i.dispatchEvent(new Event("input"));
+        const sb = byId("send"); if (sb) sb.click();
+        watchReply();
+      }
+      function watchReply() {
+        clearInterval(stabilizeT);
+        let prev = "", stable = 0, waited = 0;
+        stabilizeT = setInterval(() => {
+          waited += 500;
+          const nodes = tr.querySelectorAll(".assistant");
+          const txt = finalText(nodes[nodes.length - 1]);
+          if (txt && txt === prev) stable++; else { stable = 0; prev = txt; }
+          if ((stable >= 4 && txt) || waited > 180000) {
+            clearInterval(stabilizeT);
+            if (txt) jspeak(txt, () => { if (jarvis) setTimeout(startListen, 500); });
+            else if (jarvis) setTimeout(startListen, 800);
+          }
+        }, 500);
+      }
+
+      function toggleJarvisUI(on) {
+        const chatPage = byId("chatPage");
+        const coderPage = byId("coderPage");
+        const jarvisContainer = byId("jarvisContainer");
+        const normalSidebarTop = byId("normalSidebarTop");
+        const miniChatSection = byId("miniChatSection");
+
+        if (on) {
+          chatPage.hidden = true;
+          coderPage.hidden = true;
+          jarvisContainer.hidden = false;
+          normalSidebarTop.hidden = true;
+          miniChatSection.hidden = false;
+          syncMiniChat();
+        } else {
+          jarvisContainer.hidden = true;
+          normalSidebarTop.hidden = false;
+          miniChatSection.hidden = true;
+
+          // Restore normal state checks
+          const isCoderActive = byId("btnCoderChats").classList.contains("active");
+          if (isCoderActive) {
+            chatPage.hidden = true;
+            coderPage.hidden = false;
+          } else {
+            chatPage.hidden = false;
+            coderPage.hidden = true;
+          }
+        }
+      }
+
+      // --- Microphone Input Selection ---
+      const micSelect = byId("jarvisMicSelect");
+      let activeAudioStream = null;
+
+      async function initMicSelector() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+          if (micSelect) micSelect.style.display = "none";
+          return;
+        }
+        try {
+          // Request mic access first to get device labels
+          await navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+            stream.getTracks().forEach(t => t.stop());
+          }).catch(() => {});
+
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const mics = devices.filter(d => d.kind === "audioinput");
+          
+          if (micSelect) {
+            micSelect.innerHTML = mics.map(m => 
+              `<option value="${m.deviceId}">${m.label || `Microphone ${m.deviceId.slice(0, 5)}`}</option>`
+            ).join("") || '<option value="">Default Microphone</option>';
+            
+            // Prefer headphone/headset if present
+            const headphoneMic = mics.find(m => 
+              /headphone|headset|hands-free|bluetooth|earbud/i.test(m.label)
+            );
+            if (headphoneMic) {
+              micSelect.value = headphoneMic.deviceId;
+              selectMicrophone(headphoneMic.deviceId);
+            }
+          }
+        } catch (e) {
+          console.error("Error initializing mic selector:", e);
+        }
+      }
+
+      async function selectMicrophone(deviceId) {
+        if (activeAudioStream) {
+          activeAudioStream.getTracks().forEach(t => t.stop());
+          activeAudioStream = null;
+        }
+        if (!deviceId) return;
+        try {
+          activeAudioStream = await navigator.mediaDevices.getUserMedia({
+            audio: { deviceId: { exact: deviceId } }
+          });
+        } catch (e) {
+          console.error("Failed to set active audio stream device:", e);
+        }
+      }
+
+      if (micSelect) {
+        micSelect.onchange = () => selectMicrophone(micSelect.value);
+      }
+
+      jarvisBtn.onclick = () => {
+        jarvis = !jarvis;
+        jarvisBtn.classList.toggle("on", jarvis);
+        toggleJarvisUI(jarvis);
+        if (jarvis) {
+          speakOn = false; if (speakBtn) speakBtn.classList.remove("on");  // avoid double TTS
+          initMicSelector();
+          loadJarvisVoices();
+          setJarvisState("idle");
+          if (window.toast) toast("J.A.R.V.I.S online — speak your command.");
+          jspeak("Jarvis online. How can I help?", () => startListen());
+        } else {
+          try { jrec && jrec.stop(); } catch (e) {}
+          if (synth) synth.cancel();
+          if (activeAudioStream) {
+            activeAudioStream.getTracks().forEach(t => t.stop());
+            activeAudioStream = null;
+          }
+          clearInterval(stabilizeT);
+          jarvisBtn.classList.remove("listening");
+          if (window.toast) toast("J.A.R.V.I.S mode off");
+        }
+      };
+
+      // Wire mini chat composer events
+      const miniSend = byId("miniSend");
+      const miniInput = byId("miniInput");
+      if (miniSend && miniInput) {
+        const handleMiniSend = () => {
+          const val = miniInput.value.trim();
+          if (!val) return;
+          miniInput.value = "";
+          byId("jarvisStatusText").textContent = "Processing..."; setJarvisState("thinking");
+          if (typeof send === "function") {
+            send(val);
+            watchReply();
+          }
+        };
+        miniSend.onclick = handleMiniSend;
+        miniInput.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            handleMiniSend();
+          }
+        });
+      }
+    } else if (jarvisBtn) {
+      jarvisBtn.style.display = "none";
+    }
+
+    // --- Remote Workspace: live view of workers hired in Source Worker ("Source 1") ---
+    (function initRemoteWorkspace() {
+      const btn = byId("btnRemoteWs");
+      const page = byId("remoteWsPage");
+      const body = byId("rwsBody");
+      const dot = byId("rwsRefreshDot");
+      if (!btn || !page || !body) return;
+      let pollT = null, active = false;
+
+      const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+      const statusClass = (s) => {
+        s = (s || "idle").toLowerCase();
+        if (/work|run|think|active|progress|busy/.test(s)) return "busy";
+        if (/done|complete|finish|success/.test(s)) return "done";
+        if (/error|fail|block/.test(s)) return "error";
+        return "idle";
+      };
+      const timeAgo = (t) => {
+        if (!t) return "";
+        const ms = (typeof t === "number") ? t * (t < 1e12 ? 1000 : 1) : Date.parse(t);
+        if (!ms) return "";
+        const d = Math.max(0, Date.now() - ms) / 1000;
+        if (d < 60) return "just now";
+        if (d < 3600) return Math.floor(d / 60) + "m ago";
+        if (d < 86400) return Math.floor(d / 3600) + "h ago";
+        return Math.floor(d / 86400) + "d ago";
+      };
+
+      function render(data) {
+        if (!data || data.installed === false) {
+          body.innerHTML = `<div class="rws-empty"><div class="rws-empty-mark">🛰️</div>
+            <h3>No Source Worker activity yet</h3>
+            <p>Hire workers and start a project in <strong>Source Worker</strong>, and their live status shows up here.</p>
+            <code>${esc((data && data.data_dir) || "")}</code></div>`;
+          return;
+        }
+        const agents = data.agents || [], proj = data.project || {}, jobs = data.jobs || [];
+        let html = "";
+
+        if (proj.goal || (proj.active_agents && proj.active_agents.length)) {
+          html += `<div class="rws-project ${statusClass(proj.status)}">
+            <div class="rws-project-top">
+              <span class="rws-badge ${statusClass(proj.status)}">${esc(proj.status || "idle")}</span>
+              <span class="rws-project-label">Current project</span>
+            </div>
+            <div class="rws-project-goal">${esc(proj.goal || "—")}</div>
+            ${(proj.active_agents && proj.active_agents.length) ? `<div class="rws-project-agents">Active: ${proj.active_agents.map(esc).join(", ")}</div>` : ""}
+          </div>`;
+        }
+
+        html += `<div class="rws-section-title">Workers <span>${agents.length}</span></div>`;
+        if (!agents.length) {
+          html += `<div class="rws-empty-inline">No workers hired yet in Source Worker.</div>`;
+        } else {
+          html += `<div class="rws-agents">`;
+          for (const a of agents) {
+            const sc = statusClass(a.status);
+            const logs = (a.recent_logs || []).map(l => {
+              const msg = (typeof l === "string") ? l : (l.msg || l.message || l.text || JSON.stringify(l));
+              return `<div class="rws-log">${esc(msg)}</div>`;
+            }).join("");
+            html += `<div class="rws-card ${sc}">
+              <div class="rws-card-head">
+                <span class="rws-avatar">${esc(a.avatar || "🤖")}</span>
+                <div class="rws-card-id">
+                  <div class="rws-card-name">${esc(a.name)}</div>
+                  <div class="rws-card-role">${esc(a.role)}</div>
+                </div>
+                <span class="rws-badge ${sc}">${esc(a.status || "idle")}</span>
+              </div>
+              ${a.current_task ? `<div class="rws-task">${esc(a.current_task)}</div>` : `<div class="rws-task muted">Idle — no task assigned</div>`}
+              ${logs ? `<div class="rws-logs">${logs}</div>` : ""}
+            </div>`;
+          }
+          html += `</div>`;
+        }
+
+        if (jobs.length) {
+          html += `<div class="rws-section-title">Recent jobs <span>${jobs.length}</span></div><div class="rws-jobs">`;
+          for (const j of jobs) {
+            const sc = statusClass(j.status);
+            html += `<div class="rws-job">
+              <span class="rws-badge ${sc}">${esc(j.status)}</span>
+              <span class="rws-job-goal">${esc(j.goal)}</span>
+              <span class="rws-job-time">${esc(timeAgo(j.updated))}</span>
+            </div>`;
+          }
+          html += `</div>`;
+        }
+
+        body.innerHTML = html;
+      }
+
+      async function poll() {
+        if (dot) dot.classList.add("active");
+        try {
+          const r = await fetch("/api/remote-workspace");
+          render(await r.json());
+        } catch (e) {
+          body.innerHTML = `<div class="rws-empty"><h3>Couldn't reach the workspace</h3><p>${esc(e.message || e)}</p></div>`;
+        } finally {
+          if (dot) setTimeout(() => dot.classList.remove("active"), 400);
+        }
+      }
+
+      function show() {
+        active = true;
+        const chatPage = byId("chatPage"), coderPage = byId("coderPage"), jc = byId("jarvisContainer");
+        if (chatPage) chatPage.hidden = true;
+        if (coderPage) coderPage.hidden = true;
+        if (jc) jc.hidden = true;
+        page.hidden = false;
+        btn.classList.add("active");
+        poll();
+        clearInterval(pollT);
+        pollT = setInterval(poll, 3000);
+      }
+      function hide() {
+        if (!active) return;
+        active = false;
+        page.hidden = true;
+        btn.classList.remove("active");
+        clearInterval(pollT); pollT = null;
+        const chatPage = byId("chatPage");
+        if (chatPage) chatPage.hidden = false;
+      }
+
+      btn.onclick = () => { active ? hide() : show(); };
+
+      // Switching to chat / coder / JARVIS elsewhere drops the remote view + its polling
+      ["newChat", "convList", "btnCoderChats", "jarvisBtn"].forEach(id => {
+        const el = byId(id);
+        if (el) el.addEventListener("click", () => { if (active) hide(); }, true);
+      });
+
+      const rwsRefresh = byId("rwsRefresh");
+      if (rwsRefresh) rwsRefresh.onclick = poll;
+    })();
+  })();
+  </script>
 </body>
 </html>

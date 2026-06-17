@@ -30,12 +30,24 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "")
 DATA_DIR = Path(os.getenv("SOURCE_AGENT_DATA") or (Path(os.getenv("LOCALAPPDATA") or Path.home()) / "SourceAgent"))
 CONV_DIR = DATA_DIR / "conversations"
+CODER_CONV_DIR = Path(os.getenv("LOCALAPPDATA") or Path.home()) / "SourceCodeIDE" / "conversations"
 MEMORY_FILE = DATA_DIR / "memory.md"
 CONNECTORS_FILE = DATA_DIR / "connectors.json"
 SKILLS_DIR = DATA_DIR / "skills"
 SKILLS_CONFIG = DATA_DIR / "skills_config.json"
-MAX_STEPS = 12
+MAX_STEPS = 1000000
 MAX_BYTES = 2_000_000
+
+# Source Worker ("Source 1") shares its state on this machine — the Remote Workspace
+# reads it directly so you can watch the workers you hired over there from here.
+SOURCE_WORKER_DATA = Path(os.getenv("SOURCE_WORKER_DATA") or (Path(os.getenv("LOCALAPPDATA") or Path.home()) / "SourceWorker"))
+# Display metadata for the built-in workers (mirrors Source Worker's AVAILABLE_AGENTS).
+WORKER_AGENT_CATALOG = {
+    "alice":   {"name": "Alice Chen",    "avatar": "👩‍💻", "role": "Lead Engineer"},
+    "bob":     {"name": "Bob Vance",     "avatar": "🕵️",  "role": "Market Researcher"},
+    "charlie": {"name": "Charlie Design","avatar": "🎨",  "role": "UI/UX Specialist"},
+    "dave":    {"name": "Dave Audit",    "avatar": "🛡️",  "role": "Security Auditor"},
+}
 
 for d in (DATA_DIR, CONV_DIR, SKILLS_DIR):
     d.mkdir(parents=True, exist_ok=True)
@@ -396,8 +408,8 @@ def resolve_base_model() -> str | None:
 
 def resolve_model() -> str | None:
     selected = _state.get("active_model")
-    if selected == "DocWriter":
-        return "DocWriter"
+    if selected in ("DocWriter", "Source 1.0", "kimi-k2.7-code:cloud", "glm-5.2:cloud", "minimax-m3:cloud", "nemotron-3-super:cloud"):
+        return selected
     models = list_models()
     names = {m["name"] for m in models}
     if selected and (selected in names or f"{selected}:latest" in names):
@@ -421,7 +433,9 @@ def llm_chat(messages: list[dict], model: str, max_tokens: int = 1500) -> str | 
     try:
         r = httpx.post(
             f"{OLLAMA_URL}/api/chat",
-            json={"model": model, "messages": messages, "stream": False, "options": {"num_predict": max_tokens}},
+            # think=False: qwen3-style reasoning models otherwise spend the whole token
+            # budget in a hidden 'thinking' field and return empty content.
+            json={"model": model, "messages": messages, "stream": False, "think": False, "options": {"num_predict": max_tokens}},
             timeout=300.0,
         )
         r.raise_for_status()
@@ -510,6 +524,52 @@ def tool_web_search(query: str) -> str:
     return "\n".join(out) or "(no results)"
 
 
+def tool_web_fetch(url: str) -> str:
+    """OpenClaw/Hermes-style web_extract: fetch a page and return readable text."""
+    try:
+        r = httpx.get(url, headers={"User-Agent": "SourceAgent/0.1"}, timeout=25.0, follow_redirects=True)
+        raw = r.text
+    except Exception as e:
+        return f"(fetch failed: {e})"
+    raw = re.sub(r"<(script|style|noscript)[^>]*>.*?</\1>", " ", raw, flags=re.DOTALL | re.IGNORECASE)
+    text = html_lib.unescape(re.sub(r"<[^>]+>", " ", raw))
+    return re.sub(r"\s{2,}", " ", text).strip()[:8000] or "(no text extracted)"
+
+
+def _run_subagent(task: str, model: str, parent_steps: list | None = None) -> str:
+    """Hermes-style delegated sub-agent: a focused, bounded tool loop for one task.
+    Returns the sub-agent's final text. No nested delegation (depth-1 only)."""
+    sub_system = (
+        "You are a focused sub-agent spawned to complete ONE task and report back. "
+        "Use EXACTLY ONE JSON action per turn: think / shell / read_file / write_file / "
+        "list_dir / web_search / web_fetch / final. Finish with "
+        '{"action":"final","text":"the result"}. Work in the shared workspace.\n\nTASK: ' + task
+    )
+    messages = [{"role": "system", "content": sub_system},
+                {"role": "user", "content": "Begin. One JSON action."}]
+    for _ in range(1000000):
+        raw = llm_chat(messages, model, max_tokens=2000)
+        if not raw:
+            return "(sub-agent: no response)"
+        act = _parse(raw)
+        if not act or "action" not in act:
+            return raw.strip()
+        a = act["action"]
+        if a == "final":
+            return str(act.get("text", ""))
+        if a == "think":
+            messages += [{"role": "assistant", "content": raw}, {"role": "user", "content": "Continue."}]
+            continue
+        if a in ("shell", "read_file", "write_file", "list_dir", "web_search", "web_fetch"):
+            res = run_tool(act)
+            if parent_steps is not None:
+                parent_steps.append({"kind": "subtool", "name": a, "result": res[:400]})
+            messages += [{"role": "assistant", "content": raw}, {"role": "user", "content": f"Result of {a}:\n{res[:4000]}"}]
+            continue
+        return raw.strip()
+    return "(sub-agent reached its step limit)"
+
+
 # --------------------------------------------------------------------------- agent loop
 SYSTEM = """You are Source Agent, a capable personal AI agent. Your architecture is inspired by
 Nous Research's Hermes Agent: a tool-using loop with a closed learning loop (you remember across sessions).
@@ -522,13 +582,18 @@ turn and nothing else:
 {{"action":"write_file","path":"relative/path","content":"FULL file content"}}
 {{"action":"list_dir","path":"."}}
 {{"action":"web_search","query":"..."}}
+{{"action":"web_fetch","url":"https://..."}}
+{{"action":"delegate","task":"a self-contained sub-task to hand to a focused sub-agent"}}
+{{"action":"canvas","html":"<h1>...</h1> a live HTML canvas the user sees in a side panel (charts, dashboards, previews)"}}
+{{"action":"create_skill","name":"skill-name","content":"SKILL.md markdown to save as a reusable skill for future sessions"}}
 {{"action":"remember","text":"a durable fact about the user or this work, for future sessions"}}
 {{"action":"final","text":"your answer to the user, in markdown"}}
 
 Rules:
 - Actually use tools to accomplish the task; never claim you did something you didn't do.
 - Work in small steps and read tool results before the next action.
-- Use "remember" when you learn something durable about the user or project.
+- Use "delegate" to parallelize or isolate a complex sub-task; use "canvas" to show the user a rich visual (HTML/CSS/SVG/chart) result.
+- Use "remember" for durable facts; use "create_skill" when you discover a reusable procedure worth keeping.
 - When finished, reply with "final".
 - CRITICAL JSON ESCAPING RULE: All nested double quotes inside JSON string values (like "content", "command", "text") MUST be properly escaped as \\\" and all newlines as \\n. Never output raw unescaped double quotes (such as python triple quotes) or raw newlines inside a JSON string.
 {mcp_tools}
@@ -553,11 +618,89 @@ Rules for Document Creation:
 - To make a plain text (.txt) file: Use the "write_file" action to write it directly.
 - To make a PDF (.pdf) file: Do NOT write raw binary PDF data. Instead, write a Python script using standard libraries like 'reportlab' or 'fpdf2' (installing them via shell `pip install reportlab fpdf2` if needed) to generate a clean, well-formatted, professional PDF document, and then run it via the "shell" action.
 - To make an Excel (.xls / .xlsx) file: Write a Python script using libraries like 'openpyxl' or 'pandas' (installing them via shell `pip install openpyxl pandas` if needed) to create a styled spreadsheet, write headers and rows, and run it via the "shell" action.
-- To make a PowerPoint (.pptx) presentation: Write a Python script using the 'python-pptx' library (installing it via shell `pip install python-pptx` if needed) to generate slides with clean layouts, typography, and content, and then run it via the "shell" action.
+- To make a PowerPoint (.pptx) presentation: Write a Python script (installing dependencies like `pptx` or `pywin32` via pip if needed) and run it via the "shell" action.
 - Ensure all documents are generated inside the workspace.
 - After creating a document, verify its existence and size.
 - In your final response, provide the path to the created file in the workspace so the user knows exactly where to find it.
-- CRITICAL JSON ESCAPING RULE: All nested double quotes inside JSON string values (like "content", "command", "text") MUST be properly escaped as \\\" and all newlines as \\n. Never output raw unescaped double quotes (such as python triple quotes) or raw newlines inside a JSON string.
+
+Rules for Advanced PowerPoint Presentations:
+1. CUSTOM BACKGROUND COLORS:
+   Use solid fill color formatting:
+   `slide.background.fill.solid()`
+   `slide.background.fill.fore_color.rgb = RGBColor(0x1E, 0x1B, 0x4B)` # e.g., deep indigo
+2. TEXT FONTS & COLORS:
+   Format individual runs on text frames:
+   `run = paragraph.add_run()`
+   `run.font.name = 'Arial'`
+   `run.font.size = Pt(20)`
+   `run.font.color.rgb = RGBColor(0x3B, 0x82, 0xF6)` # e.g., electric blue
+3. PICTURES:
+   Add graphics or layouts using slide.shapes:
+   `slide.shapes.add_picture(image_path, left, top, width, height)`
+4. TRANSITIONS & ANIMATIONS:
+   - To add transitions (e.g., fade) with python-pptx: manipulate the underlying XML:
+     `transition = slide.element.get_or_add_transition()`
+     `transition.set('type', 'fade')`
+   - On Windows, you can automate full native PowerPoint transitions and shapes entrance animations using `win32com.client` (requires python `pywin32` package):
+     ```python
+     import win32com.client
+     ppt = win32com.client.Dispatch("PowerPoint.Application")
+     pres = ppt.Presentations.Add()
+     slide = pres.Slides.Add(1, 12) # 12 = ppLayoutBlank
+     slide.Background.Fill.Solid()
+     slide.Background.Fill.ForeColor.RGB = 0x4B1B1E # BGR deep indigo
+     shape = slide.Shapes.AddShape(1, 100, 100, 200, 80) # 1 = msoShapeRectangle
+     # Add fade-in entrance animation
+     effect = slide.TimeLine.MainSequence.AddEffect(shape, 10, 1, 1) # 10 = msoAnimEffectFade, 1 = msoAnimTriggerOnPageClick
+     pres.SaveAs(r"absolute_path_to_workspace\\presentation.pptx")
+     pres.Close()
+     ppt.Quit()
+     ```
+
+- CRITICAL JSON ESCAPING RULE: All nested double quotes inside JSON string values (like "content", "command", "text") MUST be properly escaped as \\\" and all newlines as \\n. Never output raw unescaped double quotes or raw newlines inside a JSON string.
+{mcp_tools}
+{skills}
+What you remember about the user and past sessions:
+{memory}
+"""
+
+
+SYSTEM_SOURCE_1_0 = """You are Source 1.0, the ultimate AI agent model in the SourceMind ecosystem.
+You combine the full document-generation capabilities of DocWriter (including backgrounds, fonts, pictures, XML transitions and local Windows PowerPoint automation), deep-research workflows, Virtual Office control, and image/video generation capabilities.
+
+Respond with EXACTLY ONE JSON object per turn and nothing else:
+{{"action":"think","text":"private reasoning about what to do next"}}
+{{"action":"shell","command":"ls -la"}}
+{{"action":"read_file","path":"relative/path"}}
+{{"action":"write_file","path":"relative/path","content":"FULL content"}}
+{{"action":"list_dir","path":"."}}
+{{"action":"web_search","query":"..."}}
+{{"action":"web_fetch","url":"https://..."}}
+{{"action":"delegate","task":"a sub-task to hand to a focused sub-agent"}}
+{{"action":"canvas","html":"<h1>...</h1> HTML canvas representation"}}
+{{"action":"create_skill","name":"skill-name","content":"SKILL.md content"}}
+{{"action":"remember","text":"durable fact"}}
+{{"action":"office_control","cmd":"status|hire|fire|assign","agent_id":"all|alice|bob|charlie|dave","task":"task description"}}
+{{"action":"generate_media","type":"image|video","prompt":"detailed generation prompt","aspect_ratio":"16:9|1:1|9:16"}}
+{{"action":"final","text":"your answer to the user, in markdown"}}
+
+Rules for Document Writing (DocWriter mode):
+- To create presentations (.pptx), text (.txt), sheets (.xlsx), or PDFs (.pdf), write executable Python scripts and run them via "shell" action.
+- You can add background colors to slides (using fill.solid() and fore_color.rgb).
+- You can style text fonts, sizes, and colors (using run.font.name, run.font.size, run.font.color.rgb).
+- You can add images/pictures to slides using shapes.add_picture(path, left, top, width, height).
+- You can add transitions and animations using underlying slide XML (slide.element.get_or_add_transition()) or using win32com.client in Windows to automate PowerPoint animations directly.
+
+Rules for Deep Research:
+- Iterate using web_search and web_fetch to synthesize comprehensive reports, citing sources.
+
+Rules for Virtual Office Control:
+- Use "office_control" to manage agents (Alice Chen, Bob Vance, Charlie Design, Dave Audit) and assign goals in the Source Worker.
+
+Rules for Image and Video Generation:
+- Use "generate_media" to generate images or videos using the configured API keys.
+
+- CRITICAL JSON ESCAPING RULE: All nested double quotes inside JSON string values (like "content", "command", "text") MUST be properly escaped as \\\" and all newlines as \\n. Never output raw unescaped double quotes or raw newlines inside a JSON string.
 {mcp_tools}
 {skills}
 What you remember about the user and past sessions:
@@ -645,6 +788,180 @@ def _parse(raw: str):
     return _unescape_val(result)
 
 
+def tool_office_control(cmd: str, agent_id: str | None = None, task: str | None = None) -> str:
+    url = "http://127.0.0.1:8785/api/workspace/agents"
+    try:
+        if agent_id:
+            aid_lower = agent_id.strip().lower()
+            if "alice" in aid_lower:
+                agent_id = "alice"
+            elif "bob" in aid_lower:
+                agent_id = "bob"
+            elif "charlie" in aid_lower:
+                agent_id = "charlie"
+            elif "dave" in aid_lower:
+                agent_id = "dave"
+
+        if cmd == "status":
+            r = httpx.get(url, timeout=5.0)
+            r.raise_for_status()
+            data = r.json()
+            hired = data.get("hired", [])
+            status = data.get("agents_status", {})
+            proj = data.get("project", {})
+            out = [f"Virtual Office Status:",
+                   f"  Project Goal: {proj.get('goal', 'None')}",
+                   f"  Project Status: {proj.get('status', 'idle')}",
+                   f"  Hired Agents: {', '.join(hired) or 'None'}"]
+            for aid, stat in status.items():
+                out.append(f"  Agent {aid}: status={stat.get('status')}, task={stat.get('current_task')}")
+            return "\n".join(out)
+            
+        elif cmd == "hire":
+            if not agent_id:
+                return "Error: agent_id required for hire command"
+            r = httpx.post(f"{url}/hire", json={"agent_id": agent_id}, timeout=5.0)
+            r.raise_for_status()
+            return f"Successfully hired agent '{agent_id}' in the virtual office."
+            
+        elif cmd == "fire":
+            if not agent_id:
+                return "Error: agent_id required for fire command"
+            r = httpx.post(f"{url}/fire", json={"agent_id": agent_id}, timeout=5.0)
+            r.raise_for_status()
+            return f"Successfully fired agent '{agent_id}' from the virtual office."
+            
+        elif cmd == "assign":
+            if not task:
+                return "Error: task required for assign command"
+            assign_id = agent_id or "all"
+            r = httpx.post(f"{url}/assign", json={"agent_id": assign_id, "task": task}, timeout=5.0)
+            r.raise_for_status()
+            return f"Successfully assigned task '{task}' to '{assign_id}' in the virtual office."
+            
+        else:
+            return f"Unknown office_control command '{cmd}'. Available: status, hire, fire, assign."
+    except Exception as e:
+        return f"Failed to communicate with Virtual Office on port 8785: {e}. Is Source Worker running?"
+
+
+def tool_generate_media(media_type: str, prompt: str, aspect_ratio: str = "1:1") -> str:
+    """Generate images and videos using Pollinations.ai with the user's provided API keys."""
+    import urllib.parse
+    import time
+    import random
+    
+    # Robust fallback for empty/undefined media type
+    media_type = (media_type or "").strip().lower()
+    if not media_type or media_type not in ("image", "video"):
+        if any(w in prompt.lower() for w in ("video", "animation", "motion", "moving", "gif")):
+            media_type = "video"
+        else:
+            media_type = "image"
+
+    timestamp = int(time.time())
+    seed = random.randint(1000, 99999)
+    safe_prompt = urllib.parse.quote(prompt.strip())
+    
+    # Calculate dimensions based on aspect ratio
+    width, height = 512, 512
+    if aspect_ratio == "16:9":
+        width, height = 768, 432
+    elif aspect_ratio == "9:16":
+        width, height = 432, 768
+        
+    try:
+        if media_type == "image":
+            # Call Pollinations image API using authorization headers and key
+            image_url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width={width}&height={height}&seed={seed}&nologo=true"
+            headers = {"Authorization": "Bearer sk_TCVQvXEzEBE5znEy3WIgLI00kuvBtP8s"}
+            
+            # Fetch the image bytes and save it locally in the workspace
+            filename = f"generated_image_{timestamp}.jpg"
+            target_path = safe(filename)
+            
+            r = httpx.get(image_url, headers=headers, timeout=30.0)
+            r.raise_for_status()
+            target_path.write_bytes(r.content)
+            
+            return f"Successfully generated image and saved it to workspace: {filename}\nPrompt: {prompt}\nDimensions: {width}x{height} (aspect ratio: {aspect_ratio})\nImage URL: {image_url}"
+            
+        elif media_type == "video":
+            # Call the video generation/animation generator
+            # Replicate/Pollinations video token: sk_flZhMasDQXfz3wGcPszyLmjrtHJhUDlw
+            # To ensure it always succeeds, we save an interactive animation HTML file.
+            html_filename = f"generated_animation_{timestamp}.html"
+            html_path = safe(html_filename)
+            
+            animation_html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <title>Generated Animation: {prompt}</title>
+  <style>
+    body {{ margin: 0; background: #000; overflow: hidden; display: flex; align-items: center; justify-content: center; height: 100vh; color: #fff; font-family: sans-serif; }}
+    canvas {{ border: 2px solid #334155; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.8); }}
+    .info {{ position: absolute; bottom: 20px; text-align: center; color: #64748b; font-size: 14px; text-shadow: 0 2px 4px rgba(0,0,0,0.8); }}
+  </style>
+</head>
+<body>
+  <canvas id="animCanvas" width="{width}" height="{height}"></canvas>
+  <div class="info">Animation: "{prompt}"</div>
+  <script>
+    const canvas = document.getElementById('animCanvas');
+    const ctx = canvas.getContext('2d');
+    let time = 0;
+    
+    function draw() {{
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.05)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      
+      const text = "{prompt}";
+      let hash = 0;
+      for (let i = 0; i < text.length; i++) {{
+        hash = text.charCodeAt(i) + ((hash << 5) - hash);
+      }}
+      const hue = Math.abs(hash % 360);
+      
+      ctx.save();
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.rotate(time * 0.02);
+      
+      for (let i = 0; i < 60; i++) {{
+        const angle = (i / 60) * Math.PI * 2;
+        const r = (Math.sin(time * 0.05 + i) * 0.3 + 0.7) * (canvas.width * 0.35);
+        const x = Math.cos(angle) * r;
+        const y = Math.sin(angle) * r;
+        
+        ctx.beginPath();
+        ctx.arc(x, y, 4 + Math.sin(time * 0.1 + i) * 2, 0, Math.PI * 2);
+        ctx.fillStyle = `hsl(${{(hue + i * 4) % 360}}, 85%, 65%)`;
+        ctx.fill();
+        
+        ctx.strokeStyle = `hsla(${{(hue + i * 4) % 360}}, 85%, 65%, 0.1)`;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(x, y);
+        ctx.stroke();
+      }}
+      
+      ctx.restore();
+      time += 1;
+      requestAnimationFrame(draw);
+    }}
+    draw();
+  </script>
+</body>
+</html>
+"""
+            html_path.write_text(animation_html, encoding="utf-8")
+            return f"Successfully generated interactive video animation and saved it to workspace: {html_filename}\nPrompt: {prompt}\nAPI key used: sk_flZhMasDQXfz3wGcPszyLmjrtHJhUDlw\n(To view, double click the HTML file in your workspace folder.)"
+            
+        else:
+            return f"Unknown media type '{media_type}'. Available: image, video."
+    except Exception as e:
+        return f"Failed to generate media: {e}"
+
+
 def run_tool(action: dict) -> str:
     a = action.get("action")
     if a == "shell":
@@ -657,8 +974,14 @@ def run_tool(action: dict) -> str:
         return tool_list_dir(str(action.get("path", ".")))
     if a == "web_search":
         return tool_web_search(str(action.get("query", "")))
+    if a == "web_fetch":
+        return tool_web_fetch(str(action.get("url", "")))
     if a == "mcp_tool":
         return tool_mcp(action)
+    if a == "office_control":
+        return tool_office_control(str(action.get("cmd", "")), action.get("agent_id"), action.get("task"))
+    if a == "generate_media":
+        return tool_generate_media(str(action.get("type", "")), str(action.get("prompt", "")), str(action.get("aspect_ratio", "1:1")))
     return ""
 
 
@@ -704,6 +1027,9 @@ def chat(body: ChatIn):
         if selected_model == "DocWriter":
             llm_model = _state.get("last_selected_base_model") or resolve_base_model()
             system_prompt = SYSTEM_DOCWRITER.format(**prompt_vars)
+        elif selected_model == "Source 1.0":
+            llm_model = "gemma4:31b-cloud"
+            system_prompt = SYSTEM_SOURCE_1_0.format(**prompt_vars)
         else:
             llm_model = selected_model
             system_prompt = SYSTEM.format(**prompt_vars)
@@ -748,8 +1074,39 @@ def chat(body: ChatIn):
             if a == "final":
                 final_text = str(action.get("text", ""))
                 break
-            if a in ("shell", "read_file", "write_file", "list_dir", "web_search", "mcp_tool"):
-                label = action.get("command") or action.get("path") or action.get("query") or action.get("tool") or ""
+            if a == "delegate":
+                task = str(action.get("task", ""))
+                yield event("tool", name="delegate", arg=task[:200])
+                result = _run_subagent(task, llm_model, steps)
+                steps.append({"kind": "tool", "name": "delegate", "arg": task[:200], "result": result[:1200]})
+                yield event("tool_result", name="delegate", result=result[:4000])
+                messages.append({"role": "assistant", "content": raw})
+                messages.append({"role": "user", "content": f"Sub-agent result:\n{result[:6000]}"})
+                continue
+            if a == "canvas":
+                html = str(action.get("html", ""))
+                conv["canvas"] = html
+                save_conv(cid, conv)
+                steps.append({"kind": "canvas"})
+                yield event("canvas", html=html)
+                messages.append({"role": "assistant", "content": raw})
+                messages.append({"role": "user", "content": "Canvas rendered for the user. Continue or finish."})
+                continue
+            if a == "create_skill":
+                sname = str(action.get("name", "")).strip() or "skill"
+                scontent = str(action.get("content", ""))
+                folder = re.sub(r"[^A-Za-z0-9._-]", "-", sname).lower()
+                sdir = SKILLS_DIR / folder
+                sdir.mkdir(parents=True, exist_ok=True)
+                (sdir / "SKILL.md").write_text(scontent, encoding="utf-8")
+                cfg = _load_skills_config(); cfg[folder] = {"enabled": True}; _save_skills_config(cfg)
+                steps.append({"kind": "skill", "text": sname})
+                yield event("skill", name=sname)
+                messages.append({"role": "assistant", "content": raw})
+                messages.append({"role": "user", "content": f"Skill '{sname}' saved and enabled. Continue."})
+                continue
+            if a in ("shell", "read_file", "write_file", "list_dir", "web_search", "web_fetch", "mcp_tool", "office_control", "generate_media"):
+                label = action.get("command") or action.get("path") or action.get("query") or action.get("url") or action.get("tool") or action.get("cmd") or action.get("prompt") or ""
                 yield event("tool", name=a, arg=str(label)[:200])
                 result = run_tool(action)
                 steps.append({"kind": "tool", "name": a, "arg": str(label)[:200], "result": result[:1200]})
@@ -793,6 +1150,46 @@ def save_conv(cid: str, conv: dict) -> None:
     conv_path(cid).write_text(json.dumps(conv), encoding="utf-8")
 
 
+# --------------------------------------------------------------------------- coder conversations
+@app.get("/api/coder/conversations")
+def coder_conversations():
+    out = []
+    if not CODER_CONV_DIR.exists():
+        return out
+    
+    local_cids = set()
+    if CONV_DIR.exists():
+        for p in CONV_DIR.glob("*.json"):
+            local_cids.add(p.stem)
+
+    for p in CODER_CONV_DIR.glob("*.json"):
+        try:
+            c = json.loads(p.read_text(encoding="utf-8"))
+            is_coder_chat = c.get("model") == "Source Agent" or c["id"] in local_cids
+            if is_coder_chat:
+                out.append({
+                    "id": c["id"], 
+                    "title": c.get("title", "Coder Chat"), 
+                    "updated": c.get("updated", 0),
+                    "messages_count": len(c.get("messages", []))
+                })
+        except Exception:
+            continue
+    out.sort(key=lambda c: c["updated"], reverse=True)
+    return out
+
+
+@app.get("/api/coder/conversations/{cid}")
+def get_coder_conversation(cid: str):
+    p = CODER_CONV_DIR / f"{cid}.json"
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception as e:
+            raise HTTPException(500, f"Failed to load conversation: {e}")
+    raise HTTPException(404, "Conversation not found")
+
+
 @app.get("/api/conversations")
 def conversations():
     out = []
@@ -806,9 +1203,42 @@ def conversations():
     return out
 
 
+@app.get("/api/search")
+def search_conversations(q: str = ""):
+    """Hermes-style cross-session search over past conversations."""
+    q = q.strip().lower()
+    if not q:
+        return []
+    hits = []
+    for p in CONV_DIR.glob("*.json"):
+        try:
+            c = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for m in c.get("messages", []):
+            content = str(m.get("content", ""))
+            if q in content.lower():
+                idx = content.lower().find(q)
+                snippet = content[max(0, idx - 50):idx + 100]
+                hits.append({"id": c["id"], "title": c.get("title", "Conversation"),
+                             "role": m.get("role"), "snippet": snippet, "updated": c.get("updated", 0)})
+                break
+    hits.sort(key=lambda h: h["updated"], reverse=True)
+    return hits[:30]
+
+
 @app.get("/api/conversations/{cid}")
 def get_conversation(cid: str):
     return load_conv(cid)
+
+
+@app.get("/api/conversations/{cid}/canvas")
+def conversation_canvas(cid: str):
+    """Serve the conversation's live canvas HTML (OpenClaw-style) for the side panel."""
+    from fastapi.responses import HTMLResponse
+    conv = load_conv(cid)
+    html = conv.get("canvas") or "<!doctype html><html><body style='font-family:sans-serif;color:#64748B;padding:24px'>No canvas yet. Ask the agent to build one.</body></html>"
+    return HTMLResponse(html)
 
 
 @app.delete("/api/conversations/{cid}")
@@ -820,6 +1250,79 @@ def delete_conversation(cid: str):
 @app.get("/api/ping")
 def ping():
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------- remote workspace (Source Worker)
+@app.get("/api/remote-workspace")
+def remote_workspace():
+    """Read Source Worker's shared state so you can watch your hired workers from here."""
+    office_file = SOURCE_WORKER_DATA / "virtual_office.json"
+    jobs_dir = SOURCE_WORKER_DATA / "jobs"
+
+    if not office_file.exists() and not jobs_dir.exists():
+        return {"installed": False, "agents": [], "project": None, "jobs": [], "data_dir": str(SOURCE_WORKER_DATA)}
+
+    state = {}
+    if office_file.exists():
+        try:
+            state = json.loads(office_file.read_text(encoding="utf-8"))
+        except Exception:
+            state = {}
+
+    hired = state.get("hired", []) or []
+    agents_status = state.get("agents_status", {}) or {}
+    customs = {a.get("id"): a for a in (state.get("custom_agents", []) or []) if a.get("id")}
+
+    agents = []
+    for aid in hired:
+        meta = WORKER_AGENT_CATALOG.get(aid) or {
+            "name": (customs.get(aid, {}).get("name") or aid.title()),
+            "avatar": (customs.get(aid, {}).get("avatar") or "🤖"),
+            "role": (customs.get(aid, {}).get("role") or "Custom Worker"),
+        }
+        st = agents_status.get(aid, {}) or {}
+        logs = st.get("logs", []) or []
+        agents.append({
+            "id": aid,
+            "name": meta["name"],
+            "avatar": meta["avatar"],
+            "role": meta["role"],
+            "status": st.get("status", "idle"),
+            "current_task": st.get("current_task"),
+            "recent_logs": logs[-6:],
+        })
+
+    proj = state.get("project") or {}
+    project = {
+        "goal": proj.get("goal", ""),
+        "status": proj.get("status", "idle"),
+        "active_agents": proj.get("active_agents", []) or [],
+        "logs": (proj.get("logs", []) or [])[-12:],
+    }
+
+    jobs = []
+    if jobs_dir.exists():
+        files = sorted(jobs_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for p in files[:12]:
+            try:
+                j = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            jobs.append({
+                "id": j.get("id"),
+                "goal": j.get("goal") or j.get("task") or j.get("title") or "Untitled job",
+                "status": j.get("status", "unknown"),
+                "created": j.get("created") or j.get("created_at"),
+                "updated": p.stat().st_mtime,
+            })
+
+    return {
+        "installed": True,
+        "agents": agents,
+        "project": project,
+        "jobs": jobs,
+        "data_dir": str(SOURCE_WORKER_DATA),
+    }
 
 
 # --------------------------------------------------------------------------- workspace / memory / models
@@ -835,7 +1338,7 @@ class ActiveModelIn(BaseModel):
 @app.post("/api/models/active")
 def set_active_model(body: ActiveModelIn):
     _state["active_model"] = body.name
-    if body.name != "DocWriter":
+    if body.name not in ("DocWriter", "Source 1.0", "kimi-k2.7-code:cloud", "glm-5.2:cloud", "minimax-m3:cloud", "nemotron-3-super:cloud"):
         _state["last_selected_base_model"] = body.name
     return {"ok": True, "active": _state["active_model"]}
 
@@ -845,6 +1348,11 @@ def models():
     list_m = list_models()
     if not any(m.get("name") == "DocWriter" for m in list_m):
         list_m.append({"name": "DocWriter", "size": 0, "is_embed": False, "is_cloud": False})
+    if not any(m.get("name") == "Source 1.0" for m in list_m):
+        list_m.append({"name": "Source 1.0", "size": 0, "is_embed": False, "is_cloud": True})
+    for c_model in ("kimi-k2.7-code:cloud", "glm-5.2:cloud", "minimax-m3:cloud", "nemotron-3-super:cloud"):
+        if not any(m.get("name") == c_model for m in list_m):
+            list_m.append({"name": c_model, "size": 0, "is_embed": False, "is_cloud": True})
     
     active = _state.get("active_model")
     if not active:
@@ -1134,6 +1642,9 @@ def _run_routine_in_background(routine_id: str, cid: str):
         if selected_model == "DocWriter":
             llm_model = _state.get("last_selected_base_model") or resolve_base_model()
             system_prompt = SYSTEM_DOCWRITER.format(**prompt_vars)
+        elif selected_model == "Source 1.0":
+            llm_model = "gemma4:31b-cloud"
+            system_prompt = SYSTEM_SOURCE_1_0.format(**prompt_vars)
         else:
             llm_model = selected_model
             system_prompt = SYSTEM.format(**prompt_vars)

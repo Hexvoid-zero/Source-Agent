@@ -303,9 +303,117 @@ function closeRoutineModal() {
   $("routineIntervalLabel").hidden = true;
 }
 
+// --------------------------------------------------------------------------- coder conversations
+function showCoderPage() {
+  $("chatPage").hidden = true;
+  $("coderPage").hidden = false;
+  $("btnCoderChats").classList.add("active");
+  document.querySelectorAll(".conv").forEach((c) => c.classList.remove("active"));
+  loadCoderConversations();
+}
+
+function showChatPage() {
+  $("chatPage").hidden = false;
+  $("coderPage").hidden = true;
+  $("btnCoderChats").classList.remove("active");
+}
+
+async function loadCoderConversations() {
+  const list = await api("/coder/conversations").catch(() => []);
+  const el = $("coderList"); el.innerHTML = "";
+  
+  if (!list.length) {
+    el.innerHTML = '<div class="conn-empty" style="padding: 12px; text-align: center;">No coder conversations found.</div>';
+    return;
+  }
+  
+  for (const c of list) {
+    const card = document.createElement("div");
+    card.className = "coder-item";
+    
+    const msgs = c.messages_count || 0;
+    const dateStr = c.updated ? new Date(c.updated * 1000).toLocaleDateString() : "Unknown";
+    
+    card.innerHTML = `
+      <div class="coder-item-title" title="${c.title || 'Coder Chat'}">${c.title || 'Coder Chat'}</div>
+      <div class="coder-item-meta">
+        <span>${msgs} message${msgs !== 1 ? 's' : ''}</span>
+        <span>${dateStr}</span>
+      </div>
+    `;
+    
+    card.onclick = () => openCoderConversation(c.id, card);
+    el.appendChild(card);
+  }
+}
+
+async function openCoderConversation(cid, cardElement) {
+  document.querySelectorAll(".coder-item").forEach((item) => item.classList.remove("active"));
+  if (cardElement) cardElement.classList.add("active");
+  
+  try {
+    const conv = await api(`/coder/conversations/${cid}`);
+    $("coderEmpty").hidden = true;
+    $("coderTranscriptWrap").hidden = false;
+    
+    $("coderChatTitle").textContent = conv.title || "Coder Chat";
+    
+    const date = conv.updated ? new Date(conv.updated * 1000).toLocaleString() : "Unknown";
+    $("coderChatMeta").textContent = `Last updated: ${date} | ID: ${cid}`;
+    
+    const t = $("coderTranscript");
+    t.innerHTML = "";
+    for (const m of conv.messages) {
+      renderCoderTurn(m, t);
+    }
+    t.scrollTop = 0;
+  } catch (e) {
+    toast("Error loading coder conversation: " + e.message);
+  }
+}
+
+function renderCoderTurn(m, container) {
+  const turn = document.createElement("div");
+  turn.className = "turn";
+  
+  if (m.role === "user") {
+    const u = document.createElement("div");
+    u.className = "msg-user";
+    u.textContent = m.content;
+    turn.appendChild(u);
+  } else {
+    const a = document.createElement("div");
+    a.className = "assistant";
+    
+    for (const s of m.steps || []) {
+      if (s.kind === "think" || s.action === "thinking") {
+        a.appendChild(thinkEl(s.text || s.path || "thinking…"));
+      } else if (s.kind === "memory") {
+        a.appendChild(memEl(s.text));
+      } else if (s.kind === "tool" || s.action === "shell" || s.action === "read" || s.action === "write" || s.action === "read_file" || s.action === "write_file" || s.action === "list_dir" || s.action === "web_search" || s.action === "mcp_tool") {
+        const name = s.name || s.action || "tool";
+        const arg = s.arg || s.path || "";
+        const t = toolEl(name, arg);
+        setToolResult(t, s.result || (s.ok ? "Operation succeeded" : "Operation failed"));
+        a.appendChild(t);
+      }
+    }
+    
+    if (m.content) {
+      const fin = document.createElement("div");
+      fin.innerHTML = "<p>" + fmt(m.content) + "</p>";
+      a.appendChild(fin);
+    }
+    
+    turn.appendChild(a);
+  }
+  
+  container.appendChild(turn);
+}
+
 
 // --------------------------------------------------------------------------- conversations
-function newChat() { S.cid = null; $("transcript").innerHTML = ""; showEmpty(true); loadConversations(); }
+function newChat() { showChatPage(); S.cid = null; $("transcript").innerHTML = ""; showEmpty(true); loadConversations(); }
 function showEmpty(on) {
   if (on && !$("empty")) {
     $("transcript").innerHTML = `<div class="empty" id="empty"><div class="empty-mark">☤</div><h1>Source Agent</h1>
@@ -313,6 +421,7 @@ function showEmpty(on) {
   } else if (!on && $("empty")) { $("empty").remove(); }
 }
 async function openConversation(cid) {
+  showChatPage();
   S.cid = cid;
   const conv = await api(`/conversations/${cid}`);
   const t = $("transcript"); t.innerHTML = "";
@@ -531,6 +640,9 @@ document.addEventListener("DOMContentLoaded", () => {
   };
   
   setInterval(loadRoutines, 5000);
+
+  // Coder section click
+  $("btnCoderChats").onclick = showCoderPage;
 
   boot();
 });

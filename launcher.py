@@ -21,16 +21,16 @@ _SPLASH_HTML = """\
 <html lang="en"><head><meta charset="UTF-8"><title>Source Agent</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#0d1117;display:flex;align-items:center;justify-content:center;
-height:100vh;font-family:-apple-system,"Segoe UI",Roboto,sans-serif;color:#c9d1d9;overflow:hidden}
+body{background:#1E1B4B;display:flex;align-items:center;justify-content:center;
+height:100vh;font-family:-apple-system,"Segoe UI",Roboto,sans-serif;color:#F8FAFC;overflow:hidden}
 .wrap{text-align:center}
-.logo{font-size:64px;color:#4f8cff;text-shadow:0 0 20px rgba(79,140,255,0.6);margin-bottom:20px;animation:pulse 2s ease-in-out infinite}
-h1{font-size:22px;font-weight:700;letter-spacing:.4px;margin-bottom:10px;color:#e6edf3}
-h1 span{color:#4f8cff}
-p{font-size:13px;color:#6e7681;margin-bottom:32px}
-.bar{width:200px;height:3px;background:#21262d;border-radius:3px;margin:0 auto;overflow:hidden;position:relative}
+.logo{font-size:64px;color:#3B82F6;text-shadow:0 0 20px rgba(59,130,246,0.6);margin-bottom:20px;animation:pulse 2s ease-in-out infinite}
+h1{font-size:22px;font-weight:700;letter-spacing:.4px;margin-bottom:10px;color:#F8FAFC}
+h1 span{color:#3B82F6}
+p{font-size:13px;color:#64748B;margin-bottom:32px}
+.bar{width:200px;height:3px;background:#252150;border-radius:3px;margin:0 auto;overflow:hidden;position:relative}
 .bar::after{content:'';position:absolute;left:-40%;top:0;width:40%;height:100%;
-background:linear-gradient(90deg,transparent,#4f8cff,#9a6bff,transparent);border-radius:3px;
+background:linear-gradient(90deg,transparent,#3B82F6,#06B6D4,transparent);border-radius:3px;
 animation:slide 1.2s ease-in-out infinite}
 @keyframes slide{0%{left:-40%}100%{left:100%}}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
@@ -70,6 +70,9 @@ def main():
     url = f"http://127.0.0.1:{port}"
 
     try:
+        if os.getenv("SOURCE_AGENT_HEADLESS") == "1":
+            raise RuntimeError("Headless mode requested via SOURCE_AGENT_HEADLESS")
+
         import webview
 
         window = webview.create_window(
@@ -152,8 +155,9 @@ def main():
             except Exception:
                 time.sleep(0.05)
 
-        import webbrowser
-        webbrowser.open(url)
+        if os.getenv("SOURCE_AGENT_HEADLESS") != "1":
+            import webbrowser
+            webbrowser.open(url)
         try:
             while True:
                 time.sleep(1)
