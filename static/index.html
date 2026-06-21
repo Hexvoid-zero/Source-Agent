@@ -669,6 +669,10 @@
       const miniInput = byId("miniInput");
       if (miniSend && miniInput) {
         const handleMiniSend = () => {
+          if (window.S && window.S.busy) {
+            if (typeof stopChat === "function") stopChat();
+            return;
+          }
           const val = miniInput.value.trim();
           if (!val) return;
           miniInput.value = "";
@@ -682,6 +686,7 @@
         miniInput.addEventListener("keydown", (e) => {
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
+            if (window.S && window.S.busy) return;
             handleMiniSend();
           }
         });

@@ -77,7 +77,8 @@ def main():
 
         window = webview.create_window(
             "Source Agent", html=_SPLASH_HTML,
-            width=1280, height=860, min_size=(960, 620)
+            width=1280, height=860, min_size=(960, 620),
+            text_select=True
         )
 
         def _on_gui_ready():

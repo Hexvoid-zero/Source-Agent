@@ -31,7 +31,7 @@ body {
   font-size: 13.5px; color: var(--text); background: var(--bg);
 }
 button { font-family: inherit; color: inherit; background: none; border: none; cursor: pointer; transition: .15s; }
-textarea, select, input { font-family: inherit; color: inherit; background: none; border: none; outline: none; }
+textarea, select, input { font-family: inherit; color: inherit; background: none; border: none; outline: none; user-select: text !important; -webkit-user-select: text !important; -ms-user-select: text !important; }
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-thumb { background: #272d36; border-radius: 5px; }
 ::-webkit-scrollbar-thumb:hover { background: #333b46; }

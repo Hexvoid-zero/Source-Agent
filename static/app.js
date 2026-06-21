@@ -15,7 +15,7 @@ async function api(path, opts) {
   return res.json();
 }
 
-const S = { cid: null, busy: false };
+const S = { cid: null, busy: false, abortController: null };
 const TOOL_ICON = { shell: "›_", read_file: "📄", write_file: "✎", list_dir: "🗂", web_search: "🌐", mcp_tool: "🔌" };
 
 function toast(m, ms) { const t = $("toast"); t.textContent = m; t.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(() => (t.hidden = true), ms || 2400); }
@@ -48,7 +48,9 @@ async function loadModels() {
     if (!m.models.length) { sel.innerHTML = "<option>no models</option>"; return; }
     for (const mod of m.models.filter((x) => !x.is_embed)) {
       const o = document.createElement("option");
-      o.value = mod.name; o.textContent = mod.name + (mod.is_cloud ? " ☁" : "");
+      o.value = mod.name;
+      o.textContent = mod.name + (mod.is_cloud ? " ☁" : "") + (mod.is_vision ? " 👁" : "");
+      if (mod.is_vision) o.title = "Vision model — sees the screen, so computer-use runs entirely on this one model (no screenshots handed to a separate model).";
       if (mod.name === m.active) o.selected = true;
       sel.appendChild(o);
     }
@@ -474,7 +476,13 @@ async function send(text) {
   text = (text || $("input").value).trim();
   if (!text || S.busy) return;
   $("input").value = ""; autosize();
-  S.busy = true; $("send").disabled = true;
+  if (!S.cid) {
+    S.cid = Array.from({length: 12}, () => Math.floor(Math.random()*16).toString(16)).join('');
+  }
+  const controller = new AbortController();
+  S.abortController = controller;
+  S.busy = true;
+  updateSendButtons();
   addUser(text);
 
   const turn = document.createElement("div"); turn.className = "turn";
@@ -497,7 +505,12 @@ async function send(text) {
   };
 
   try {
-    const res = await rfetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text, conversation_id: S.cid, model: $("modelSelect").value }) }, 2);
+    const res = await rfetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: text, conversation_id: S.cid, model: $("modelSelect").value }),
+      signal: controller.signal
+    }, 2);
     if (!res.ok || !res.body) throw new Error(await res.text());
     const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = "";
     for (;;) {
@@ -507,10 +520,19 @@ async function send(text) {
       while ((i = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); if (line.trim()) try { onEvent(JSON.parse(line)); } catch (e) {} }
     }
   } catch (e) {
-    working.remove(); const er = document.createElement("div"); er.innerHTML = `<p style="color:var(--red)">Error: ${e.message}</p>`; a.appendChild(er);
+    working.remove();
+    const er = document.createElement("div");
+    if (e.name === "AbortError" || (e.message && e.message.includes("aborted"))) {
+      er.innerHTML = `<p style="color:var(--accent)">Execution stopped by user.</p>`;
+    } else {
+      er.innerHTML = `<p style="color:var(--red)">Error: ${e.message}</p>`;
+    }
+    a.appendChild(er);
   } finally {
     if (working.parentNode) working.remove();
-    S.busy = false; $("send").disabled = false;
+    S.busy = false;
+    S.abortController = null;
+    updateSendButtons();
     loadConversations(); loadMemory(); loadWorkspace();
   }
 }
@@ -534,10 +556,41 @@ async function chooseWs() {
   $("wsModal").hidden = true; loadWorkspace(); toast("Workspace set");
 }
 
+// --------------------------------------------------------------------------- stop chat
+function updateSendButtons() {
+  const sendBtn = $("send");
+  const miniSendBtn = $("miniSend");
+  if (S.busy) {
+    if (sendBtn) { sendBtn.textContent = "■"; sendBtn.title = "Stop"; }
+    if (miniSendBtn) { miniSendBtn.textContent = "■"; miniSendBtn.title = "Stop"; }
+  } else {
+    if (sendBtn) { sendBtn.textContent = "↑"; sendBtn.title = "Send"; }
+    if (miniSendBtn) { miniSendBtn.textContent = "↑"; miniSendBtn.title = "Send"; }
+  }
+}
+
+async function stopChat() {
+  if (S.abortController) {
+    S.abortController.abort();
+  }
+  if (S.cid) {
+    try {
+      fetch("/api/chat/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversation_id: S.cid })
+      });
+    } catch (e) {
+      console.error("Failed to stop chat:", e);
+    }
+  }
+}
+window.stopChat = stopChat;
+
 // --------------------------------------------------------------------------- wire
 function autosize() { const i = $("input"); i.style.height = "auto"; i.style.height = Math.min(i.scrollHeight, 180) + "px"; }
 document.addEventListener("DOMContentLoaded", () => {
-  $("send").onclick = () => send();
+  $("send").onclick = () => { if (S.busy) stopChat(); else send(); };
   $("input").addEventListener("input", autosize);
   $("input").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
   $("newChat").onclick = newChat;

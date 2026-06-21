@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
+import webbrowser
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,10 +22,25 @@ from pathlib import Path
 import random
 import threading
 import httpx
+import pyautogui
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
+
+# --------------------------------------------------------------------------- DPI + safety
+# Windows DPI awareness: without this, pyautogui coordinates use *logical* pixels
+# while screenshots capture *physical* pixels, so every click lands in the wrong
+# spot on any system with display scaling (125%, 150%, etc.).
+try:
+    import ctypes
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)   # per-monitor DPI aware
+except Exception:
+    pass
+
+# Disable fail-safe globally — automated cursor movements to screen corners
+# (which happen constantly during computer-use) must not raise FailSafeException.
+pyautogui.FAILSAFE = False
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "")
@@ -59,7 +75,8 @@ STATIC_DIR = (
 _state = {
     "workspace": Path(os.getenv("SOURCE_AGENT_WORKSPACE") or (DATA_DIR / "workspace")).resolve(),
     "active_model": None,
-    "last_selected_base_model": None
+    "last_selected_base_model": None,
+    "cancelled_cids": set()
 }
 _state["workspace"].mkdir(parents=True, exist_ok=True)
 
@@ -225,6 +242,7 @@ class McpConnection:
 
 
 _mcp_connections = {}
+_mcp_tools_cache = {}
 
 
 def _get_mcp_conn(url: str) -> McpConnection:
@@ -250,10 +268,18 @@ def _mcp_initialize(url: str) -> dict | None:
 
 def _mcp_list_tools(url: str) -> list[dict]:
     """List tools from an MCP server."""
-    _mcp_initialize(url)
-    result = _mcp_rpc(url, "tools/list")
-    if result and "tools" in result:
-        return result["tools"]
+    if url in _mcp_tools_cache:
+        return _mcp_tools_cache[url]
+    try:
+        _mcp_initialize(url)
+        # Use a short timeout of 2.0s for tools list so we don't hang if server is slow
+        result = _get_mcp_conn(url).send_rpc("tools/list", timeout=2.0)
+        if result and "tools" in result:
+            _mcp_tools_cache[url] = result["tools"]
+            return result["tools"]
+    except Exception as e:
+        print(f"[MCP] Error listing tools for {url}: {e}")
+    _mcp_tools_cache[url] = []
     return []
 
 
@@ -389,7 +415,7 @@ def list_models() -> list[dict]:
         for m in r.json().get("models", []):
             name = m.get("name", "")
             if name:
-                out.append({"name": name, "size": m.get("size", 0) or 0, "is_embed": "embed" in name, "is_cloud": name.endswith("cloud")})
+                out.append({"name": name, "size": m.get("size", 0) or 0, "is_embed": "embed" in name, "is_cloud": name.endswith("cloud"), "is_vision": _is_vision_model(name)})
         return out
     except Exception:
         return []
@@ -422,6 +448,41 @@ def resolve_model() -> str | None:
     return "DocWriter"
 
 
+# Name fragments that identify a vision-capable Ollama model (for computer-use "seeing").
+VISION_MODEL_HINTS = (
+    "qwen2.5vl", "qwen2-vl", "qwen2.5-vl", "qwenvl", "-vl", ":vl",
+    "llava", "bakllava", "minicpm-v", "moondream",
+    "llama3.2-vision", "llama3.2vision", "granite3.2-vision", "gemma3", "vision",
+)
+
+
+def _is_vision_model(name: str) -> bool:
+    n = (name or "").lower()
+    if "embed" in n:
+        return False
+    return any(h in n for h in VISION_MODEL_HINTS)
+
+
+def resolve_vision_model() -> str | None:
+    """Pick a vision-capable model for computer-use. Local-first, and SPEED-first: prefer the
+    SMALLEST local vision model. A 7B VL model is 9-10GB and won't fit a 6GB GPU, so Ollama
+    spills it to CPU (~100s/step); a 3B fits in VRAM and runs many times faster — and small VL
+    models are plenty for UI grounding. Set SOURCE_AGENT_VISION_MODEL to force a specific one."""
+    models = list_models()
+    names = {m["name"] for m in models}
+    override = os.getenv("SOURCE_AGENT_VISION_MODEL")
+    if override and (override in names or f"{override}:latest" in names):
+        return override if override in names else f"{override}:latest"
+    local = sorted(
+        [m for m in models if _is_vision_model(m["name"]) and not m["is_cloud"]],
+        key=lambda m: m["size"],  # smallest first = most likely to fit VRAM = fastest
+    )
+    if local:
+        return local[0]["name"]
+    cloud = [m for m in models if _is_vision_model(m["name"]) and m["is_cloud"]]
+    return cloud[0]["name"] if cloud else None
+
+
 def llm_available() -> bool:
     try:
         return httpx.get(f"{OLLAMA_URL}/api/tags", timeout=2.0).status_code == 200
@@ -445,6 +506,282 @@ def llm_chat(messages: list[dict], model: str, max_tokens: int = 1500) -> str | 
         import traceback
         traceback.print_exc()
         return None
+
+
+# --------------------------------------------------------------------------- computer-use vision
+# Downscale screenshots before sending to the vision model. Full 1080p+ frames are huge for a
+# local VL model (prefill of ~1300+ image tokens), which is what made computer-use slow. ~1280px
+# wide keeps UI text legible while roughly halving the pixels; we record the scale so the model's
+# image-space coordinates map back to real screen pixels.
+COMPUTER_SHOT_WIDTH = int(os.getenv("SOURCE_AGENT_COMPUTER_WIDTH", "1280"))
+
+
+def _parse_coords(text: str) -> tuple[int, int] | None:
+    if not text:
+        return None
+    # 1) Match x[:=] <num> and y[:=] <num> (robust to quotes/spaces/equals/colons)
+    x_m = re.search(r'["\']?x["\']?\s*[:=]\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
+    y_m = re.search(r'["\']?y["\']?\s*[:=]\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
+    if x_m and y_m:
+        try:
+            return int(round(float(x_m.group(1)))), int(round(float(y_m.group(1))))
+        except Exception:
+            pass
+    # 2) Match list coordinate pair [x, y]
+    list_m = re.search(r'\[\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\]', text)
+    if list_m:
+        try:
+            return int(round(float(list_m.group(1)))), int(round(float(list_m.group(2))))
+        except Exception:
+            pass
+    # 3) Match comma-separated numbers x, y
+    pair_m = re.search(r'(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)', text)
+    if pair_m:
+        try:
+            return int(round(float(pair_m.group(1)))), int(round(float(pair_m.group(2))))
+        except Exception:
+            pass
+    return None
+
+
+def _capture_screen_b64(width: int = None) -> tuple:
+    """Downscaled PNG of the screen for Ollama `images`. Returns (b64, shown_w, shown_h);
+    (None, 0, 0) on failure. Records the downscale factor in _state['computer_scale'] so
+    tool_computer can convert the model's image coordinates back to real pixels."""
+    try:
+        import io
+        import base64
+        import pyautogui
+        img = pyautogui.screenshot()
+        rw, rh = img.size
+        scale = 1.0
+        w_limit = width or COMPUTER_SHOT_WIDTH
+        if w_limit and rw > w_limit:
+            scale = rw / float(w_limit)
+            img = img.resize((w_limit, max(1, round(rh / scale))))
+        _state["computer_scale"] = scale
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii"), img.size[0], img.size[1]
+    except Exception as e:
+        print(f"screen capture failed: {e}")
+        return None, 0, 0
+
+
+def _has_image(messages: list[dict]) -> bool:
+    return any(m.get("images") for m in messages)
+
+
+def _prune_old_images(messages: list[dict]) -> None:
+    """Keep only the most recent screenshot in context; older ones just bloat tokens."""
+    idxs = [i for i, m in enumerate(messages) if m.get("images")]
+    for i in idxs[:-1]:
+        messages[i].pop("images", None)
+
+
+def _computer_observation(computer_action: str, result: str, vision_model: str | None) -> dict:
+    """Follow-up message after a computer action — attaches a FRESH screenshot so a vision
+    model can actually see the screen and pick the next coordinates (Claude-style loop)."""
+    # Skip the settle delay for pure screenshot requests (screen is already current).
+    if computer_action != "screenshot":
+        time.sleep(0.5)  # let the UI settle (app launching, menu opening) before capturing
+    msg = {"role": "user", "content": f"Result of computer.{computer_action}:\n{result}"}
+    if vision_model:
+        b64, w, h = _capture_screen_b64()
+        if b64:
+            msg["images"] = [b64]
+            msg["content"] += (f"\n\n[Fresh screenshot attached — image is {w}x{h} px. "
+                               f"Read the screen, then give your next click/move as exact pixel coordinates within THIS image.]")
+        else:
+            msg["content"] += "\n\n[Screenshot capture failed; cannot see the screen this turn.]"
+    else:
+        msg["content"] += ("\n\n[NO VISION MODEL ACTIVE — you cannot see the screen, so do not guess coordinates. "
+                           "Tell the user to install one with:  ollama pull qwen2.5vl:7b  then select it and retry.]")
+    return msg
+
+
+# screen-edge glow overlay — the Claude-style "the computer is being controlled" indicator
+try:
+    import overlay as _overlay
+except Exception:
+    _overlay = None
+
+
+def _glow(on: bool) -> None:
+    try:
+        if _overlay:
+            _overlay.show() if on else _overlay.hide()
+    except Exception:
+        pass
+
+
+# --------------------------------------------------------------------------- installed apps
+WEB_APPS = {
+    "gmail": "https://mail.google.com",
+    "google calendar": "https://calendar.google.com",
+    "google docs": "https://docs.google.com",
+    "google sheets": "https://sheets.google.com",
+    "google slides": "https://slides.google.com",
+    "youtube": "https://www.youtube.com",
+    "github": "https://github.com",
+    "gmail.com": "https://mail.google.com",
+    "google": "https://www.google.com",
+}
+
+_apps_cache = {"ts": 0.0, "apps": {}}
+
+
+def list_installed_apps() -> dict:
+    """Map of {lower_name: {"name","launch","kind"}} for apps the agent can open. Sourced from
+    Start Menu .lnk shortcuts (+ Windows Store/UWP apps via Get-StartApps). Cached for 5 min."""
+    if sys.platform != "win32":
+        return {}
+    now = time.time()
+    if _apps_cache["apps"] and now - _apps_cache["ts"] < 300:
+        return _apps_cache["apps"]
+    apps: dict[str, dict] = {}
+    # 1) Start Menu shortcuts (all-users + per-user) — friendly names match how people speak
+    roots = [
+        Path(os.getenv("ProgramData", r"C:\ProgramData")) / "Microsoft/Windows/Start Menu/Programs",
+        Path(os.getenv("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
+    ]
+    for root in roots:
+        try:
+            if not root.exists():
+                continue
+            for lnk in root.rglob("*.lnk"):
+                name = lnk.stem.strip()
+                low = name.lower()
+                if low and low not in apps and "uninstall" not in low:
+                    apps[low] = {"name": name, "launch": str(lnk), "kind": "lnk"}
+        except Exception:
+            pass
+    # 2) UWP / Store apps via Get-StartApps (AppID → launch with shell:appsFolder)
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-StartApps | ForEach-Object { \"$($_.Name)`t$($_.AppID)\" }"],
+            capture_output=True, text=True, timeout=15,
+        ).stdout
+        for line in out.splitlines():
+            if "\t" not in line:
+                continue
+            name, appid = line.split("\t", 1)
+            name, appid = name.strip(), appid.strip()
+            low = name.lower()
+            if low and appid and low not in apps:
+                apps[low] = {"name": name, "launch": f"shell:appsFolder\\{appid}", "kind": "uwp"}
+    except Exception:
+        pass
+    _apps_cache.update({"ts": now, "apps": apps})
+    return apps
+
+
+def _apps_prompt() -> str:
+    """A compact, comma-separated list of installed app names for the system prompt."""
+    apps = list_installed_apps()
+    if not apps:
+        return ""
+    names = sorted({a["name"] for a in apps.values()}, key=str.lower)
+    if len(names) > 160:
+        names = names[:160]
+    return ", ".join(names)
+
+
+def _maximize_new_foreground_window(old_hwnd):
+    import time
+    import ctypes
+    try:
+        user32 = ctypes.windll.user32
+        # Poll for 5 seconds to catch the new window as it gains focus
+        for _ in range(25):
+            time.sleep(0.2)
+            hwnd = user32.GetForegroundWindow()
+            if hwnd and hwnd != old_hwnd:
+                buf = ctypes.create_unicode_buffer(256)
+                user32.GetClassNameW(hwnd, buf, 256)
+                class_name = buf.value.lower()
+                # Ignore taskbar and common shell components
+                if class_name not in (
+                    "progman", "workerw", "shell_traywnd", "dv2controlhost", 
+                    "multitaskinganview", "windows.internal.composer.composerviewhost"
+                ):
+                    # SW_MAXIMIZE = 3
+                    user32.ShowWindow(hwnd, 3)
+                    break
+    except Exception:
+        pass
+
+
+def tool_open_app(name: str, url: str = None) -> str:
+    """Launch an installed app by (fuzzy) name. Far more reliable than guessing a shell command."""
+    if not name or not name.strip():
+        return "Error: open_app needs a 'name'."
+    
+    # Capture the current active window handle before launching so we can maximize the new one
+    try:
+        import ctypes
+        old_hwnd = ctypes.windll.user32.GetForegroundWindow()
+    except Exception:
+        old_hwnd = None
+
+    q = name.strip().lower()
+
+    # If a specific launch URL was provided, open it directly
+    if url:
+        try:
+            import webbrowser
+            webbrowser.open(url)
+            if old_hwnd is not None:
+                threading.Thread(target=_maximize_new_foreground_window, args=(old_hwnd,), daemon=True).start()
+            return f"Opened '{url}' web app in default browser."
+        except Exception as e:
+            return f"Could not launch '{url}' web app: {e}"
+
+    # Check if this matches a web app URL fallback or raw URL
+    if q in WEB_APPS or q.startswith("http://") or q.startswith("https://") or any(ext in q for ext in (".com", ".org", ".net", ".edu", ".gov")):
+        url_to_open = WEB_APPS.get(q) if q in WEB_APPS else (q if (q.startswith("http://") or q.startswith("https://")) else f"https://{q}")
+        try:
+            import webbrowser
+            webbrowser.open(url_to_open)
+            if old_hwnd is not None:
+                threading.Thread(target=_maximize_new_foreground_window, args=(old_hwnd,), daemon=True).start()
+            return f"Opened '{url_to_open}' web app in default browser."
+        except Exception as e:
+            return f"Could not launch '{url_to_open}' web app: {e}"
+
+    apps = list_installed_apps()
+    if not apps:
+        # Non-Windows or enumeration failed — fall back to a plain launch attempt
+        try:
+            subprocess.Popen(f'start "" "{name}"', shell=True)
+            if old_hwnd is not None:
+                threading.Thread(target=_maximize_new_foreground_window, args=(old_hwnd,), daemon=True).start()
+            return f"Tried to launch '{name}' via shell start."
+        except Exception as e:
+            return f"Could not launch '{name}': {e}"
+    q = name.strip().lower()
+    match = (apps.get(q)
+             or next((a for k, a in apps.items() if k.startswith(q)), None)
+             or next((a for k, a in apps.items() if q in k), None)
+             or next((a for k, a in apps.items() if all(w in k for w in q.split())), None))
+    if not match:
+        sample = ", ".join(sorted({a["name"] for a in apps.values()}, key=str.lower)[:25])
+        return f"No installed app matches '{name}'. Some installed apps: {sample} …"
+    try:
+        launch = match["launch"]
+        if match["kind"] == "uwp":
+            subprocess.Popen(["explorer.exe", launch])
+        else:
+            os.startfile(launch)  # .lnk → resolves target + working dir correctly
+        
+        # Start background thread to maximize the newly opened application window
+        if old_hwnd is not None:
+            threading.Thread(target=_maximize_new_foreground_window, args=(old_hwnd,), daemon=True).start()
+
+        return f"Opened '{match['name']}'. Take a screenshot to see it, then continue."
+    except Exception as e:
+        return f"Failed to open '{match['name']}': {e}"
 
 
 # --------------------------------------------------------------------------- memory
@@ -542,13 +879,18 @@ def _run_subagent(task: str, model: str, parent_steps: list | None = None) -> st
     sub_system = (
         "You are a focused sub-agent spawned to complete ONE task and report back. "
         "Use EXACTLY ONE JSON action per turn: think / shell / read_file / write_file / "
-        "list_dir / web_search / web_fetch / final. Finish with "
+        "list_dir / web_search / web_fetch / computer / final. The 'computer' action controls the "
+        "real desktop (screenshot/mouse/click/type); after each computer action you get a fresh "
+        "screenshot — read it, then give pixel coordinates from that image. Finish with "
         '{"action":"final","text":"the result"}. Work in the shared workspace.\n\nTASK: ' + task
     )
     messages = [{"role": "system", "content": sub_system},
                 {"role": "user", "content": "Begin. One JSON action."}]
+    vision_model = resolve_vision_model()
     for _ in range(1000000):
-        raw = llm_chat(messages, model, max_tokens=2000)
+        _prune_old_images(messages)
+        step_model = vision_model if (vision_model and _has_image(messages)) else model
+        raw = llm_chat(messages, step_model, max_tokens=(900 if step_model == vision_model else 2000))
         if not raw:
             return "(sub-agent: no response)"
         act = _parse(raw)
@@ -560,13 +902,21 @@ def _run_subagent(task: str, model: str, parent_steps: list | None = None) -> st
         if a == "think":
             messages += [{"role": "assistant", "content": raw}, {"role": "user", "content": "Continue."}]
             continue
-        if a in ("shell", "read_file", "write_file", "list_dir", "web_search", "web_fetch"):
+        if a in ("shell", "read_file", "write_file", "list_dir", "web_search", "web_fetch", "computer", "open_app"):
+            if a in ("computer", "open_app"):
+                _glow(True)
             res = run_tool(act)
             if parent_steps is not None:
                 parent_steps.append({"kind": "subtool", "name": a, "result": res[:400]})
-            messages += [{"role": "assistant", "content": raw}, {"role": "user", "content": f"Result of {a}:\n{res[:4000]}"}]
+            messages.append({"role": "assistant", "content": raw})
+            if a in ("computer", "open_app"):
+                messages.append(_computer_observation(str(act.get("computer_action", "") or a), res, vision_model))
+            else:
+                messages.append({"role": "user", "content": f"Result of {a}:\n{res[:4000]}"})
             continue
+        _glow(False)
         return raw.strip()
+    _glow(False)
     return "(sub-agent reached its step limit)"
 
 
@@ -574,8 +924,7 @@ def _run_subagent(task: str, model: str, parent_steps: list | None = None) -> st
 SYSTEM = """You are Source Agent, a capable personal AI agent. Your architecture is inspired by
 Nous Research's Hermes Agent: a tool-using loop with a closed learning loop (you remember across sessions).
 
-You work inside a workspace folder and can take real actions. Respond with EXACTLY ONE JSON object per
-turn and nothing else:
+You work inside a workspace folder and can take real actions. Respond with EXACTLY ONE JSON object per turn and nothing else:
 {{"action":"think","text":"private reasoning about what to do next"}}
 {{"action":"shell","command":"ls -la"}}
 {{"action":"read_file","path":"relative/path"}}
@@ -583,18 +932,24 @@ turn and nothing else:
 {{"action":"list_dir","path":"."}}
 {{"action":"web_search","query":"..."}}
 {{"action":"web_fetch","url":"https://..."}}
-{{"action":"delegate","task":"a self-contained sub-task to hand to a focused sub-agent"}}
 {{"action":"canvas","html":"<h1>...</h1> a live HTML canvas the user sees in a side panel (charts, dashboards, previews)"}}
 {{"action":"create_skill","name":"skill-name","content":"SKILL.md markdown to save as a reusable skill for future sessions"}}
 {{"action":"remember","text":"a durable fact about the user or this work, for future sessions"}}
+{{"action":"computer","computer_action":"screenshot|mouse_hover|left_click|right_click|double_click|three_click|left_click_drag|drag_to|mouse_down|mouse_up|scroll|type|key","coordinate":[x,y],"text":"text to type or key press combos like ctrl+c"}}
+{{"action":"open_app","name":"the installed app's name, e.g. Spotify"}}
 {{"action":"final","text":"your answer to the user, in markdown"}}
-
+ 
 Rules:
 - Actually use tools to accomplish the task; never claim you did something you didn't do.
 - Work in small steps and read tool results before the next action.
-- Use "delegate" to parallelize or isolate a complex sub-task; use "canvas" to show the user a rich visual (HTML/CSS/SVG/chart) result.
+- Use "canvas" to show the user a rich visual (HTML/CSS/SVG/chart) result (e.g. you can take a screenshot and show it in the canvas).
+- Use "computer" to control the REAL desktop: screenshot, move/click the mouse, type, and press keys.
+  COMPUTER-USE LOOP: after every "computer" action (and after "open_app") you are sent a FRESH SCREENSHOT — study it, then choose the next action using EXACT pixel coordinates read from that image. ALWAYS take a "screenshot" first to see the screen before clicking. To OPEN an app, ALWAYS use the "open_app" action with the app's name — it launches the real installed app reliably; do NOT guess shell `start` commands. Whenever you open an app (using "open_app"), verify on the next screenshot if it is in full screen (maximized). If it is not full screen, maximize it immediately: either click the window's Maximize button (top-right corner) or use the "key" action with the "win+up" shortcut.
+  PROMPTING & MESSAGING APPS: When the user asks you to "prompt X to Y" or "send a message Y to X" (e.g. "Open Codex and prompt it to make Source Research"), this means you must: 1. Open app X (using "open_app"). 2. Take a screenshot to locate the input/message/prompt box on the screen (look for a text area, input box, or chat field on the screenshot). 3. Click inside that input box. 4. Type the prompt/message text Y. 5. Press the "enter" key (using the "key" action with value "enter") or click the Send/Submit button to send the prompt/message.
+  To TYPE into a field: left_click the field first, then use the "type" action. Take a fresh screenshot after big changes to confirm the result before continuing.
+  APPS INSTALLED ON THIS DEVICE you can open with open_app: {apps}
 - Use "remember" for durable facts; use "create_skill" when you discover a reusable procedure worth keeping.
-- When finished, reply with "final".
+- When finished, reply with "final" and ensure your final message contains the word "done".
 - CRITICAL JSON ESCAPING RULE: All nested double quotes inside JSON string values (like "content", "command", "text") MUST be properly escaped as \\\" and all newlines as \\n. Never output raw unescaped double quotes (such as python triple quotes) or raw newlines inside a JSON string.
 {mcp_tools}
 {skills}
@@ -612,6 +967,7 @@ You work inside a workspace folder and can take real actions. Respond with EXACT
 {{"action":"list_dir","path":"."}}
 {{"action":"web_search","query":"..."}}
 {{"action":"remember","text":"durable fact"}}
+{{"action":"computer","computer_action":"screenshot|mouse_hover|left_click|right_click|double_click|three_click|left_click_drag|drag_to|mouse_down|mouse_up|scroll|type|key","coordinate":[x,y],"text":"text to type or key press combos like ctrl+c"}}
 {{"action":"final","text":"your answer to the user, in markdown"}}
 
 Rules for Document Creation:
@@ -657,6 +1013,7 @@ Rules for Advanced PowerPoint Presentations:
      ppt.Quit()
      ```
 
+- When finished, reply with "final" and ensure your final message contains the word "done".
 - CRITICAL JSON ESCAPING RULE: All nested double quotes inside JSON string values (like "content", "command", "text") MUST be properly escaped as \\\" and all newlines as \\n. Never output raw unescaped double quotes or raw newlines inside a JSON string.
 {mcp_tools}
 {skills}
@@ -682,6 +1039,7 @@ Respond with EXACTLY ONE JSON object per turn and nothing else:
 {{"action":"remember","text":"durable fact"}}
 {{"action":"office_control","cmd":"status|hire|fire|assign","agent_id":"all|alice|bob|charlie|dave","task":"task description"}}
 {{"action":"generate_media","type":"image|video","prompt":"detailed generation prompt","aspect_ratio":"16:9|1:1|9:16"}}
+{{"action":"computer","computer_action":"screenshot|mouse_hover|left_click|right_click|double_click|three_click|left_click_drag|drag_to|mouse_down|mouse_up|scroll|type|key","coordinate":[x,y],"text":"text to type or key press combos like ctrl+c"}}
 {{"action":"final","text":"your answer to the user, in markdown"}}
 
 Rules for Document Writing (DocWriter mode):
@@ -700,6 +1058,7 @@ Rules for Virtual Office Control:
 Rules for Image and Video Generation:
 - Use "generate_media" to generate images or videos using the configured API keys.
 
+- When finished, reply with "final" and ensure your final message contains the word "done".
 - CRITICAL JSON ESCAPING RULE: All nested double quotes inside JSON string values (like "content", "command", "text") MUST be properly escaped as \\\" and all newlines as \\n. Never output raw unescaped double quotes or raw newlines inside a JSON string.
 {mcp_tools}
 {skills}
@@ -712,6 +1071,10 @@ class ChatIn(BaseModel):
     message: str
     conversation_id: str | None = None
     model: str | None = None
+
+
+class StopIn(BaseModel):
+    conversation_id: str
 
 
 def _unescape_val(val):
@@ -751,7 +1114,17 @@ def _parse(raw: str):
     path_match = re.search(r'"path"\s*:\s*"([^"]+)"', content_str)
     if path_match:
         result["path"] = path_match.group(1)
-        
+
+    # Extract computer_action (critical for computer-use actions)
+    ca_match = re.search(r'"computer_action"\s*:\s*"([^"]+)"', content_str)
+    if ca_match:
+        result["computer_action"] = ca_match.group(1)
+
+    # Extract coordinate array [x, y] (critical for mouse actions)
+    coord_match = re.search(r'"coordinate"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*\]', content_str)
+    if coord_match:
+        result["coordinate"] = [int(coord_match.group(1)), int(coord_match.group(2))]
+
     for field in ("content", "command", "query", "text", "message"):
         field_pattern = r'"' + field + r'"\s*:\s*'
         field_match = re.search(field_pattern, content_str)
@@ -962,6 +1335,168 @@ def tool_generate_media(media_type: str, prompt: str, aspect_ratio: str = "1:1")
         return f"Failed to generate media: {e}"
 
 
+def tool_computer(action: str, coordinate: list[int] = None, text: str = None) -> str:
+    """Claude-style computer use tool using PyAutoGUI.
+    Allows the agent to control mouse, keyboard, and take screenshots.
+    """
+    import time
+    from pathlib import Path
+    
+    # Sanitize action name
+    action = (action or "").strip().lower()
+
+    # The model picks coordinates from the DOWNSCALED screenshot it was shown; convert them
+    # back to real screen pixels using the scale recorded when that screenshot was captured.
+    scale = _state.get("computer_scale", 1.0) or 1.0
+    if coordinate and scale != 1.0:
+        try:
+            coordinate = [int(round(float(c) * scale)) for c in coordinate]
+        except Exception:
+            pass
+
+    try:
+        # Get screen size info
+        screen_w, screen_h = pyautogui.size()
+
+        # Smooth, eased cursor motion (Claude-style "clean" movement) instead of teleporting.
+        _tween = getattr(pyautogui, "easeInOutQuad", None)
+
+        def _glide(gx, gy, dur=0.55):
+            if _tween:
+                pyautogui.moveTo(gx, gy, duration=dur, tween=_tween)
+            else:
+                pyautogui.moveTo(gx, gy, duration=dur)
+
+        if action == "screenshot":
+            # Save the screenshot to a file in the workspace
+            timestamp = int(time.time())
+            filename = f"screenshot_{timestamp}.png"
+            save_path = safe(filename)
+            screenshot = pyautogui.screenshot()
+            screenshot.save(save_path)
+            
+            # Also write it to static directory so the client/webview or canvas can render it
+            try:
+                static_screenshot_path = STATIC_DIR / "screenshot.png"
+                screenshot.save(static_screenshot_path)
+            except Exception:
+                pass
+                
+            return f"Screenshot taken and saved as '{filename}' in workspace (Resolution: {screen_w}x{screen_h})."
+            
+        elif action == "mouse_hover":
+            if not coordinate or len(coordinate) < 2:
+                return "Error: coordinate [x, y] required for mouse_hover"
+            x, y = int(coordinate[0]), int(coordinate[1])
+            _glide(x, y)
+            return f"Moved mouse to ({x}, {y})"
+
+        elif action in ("left_click", "click"):
+            if coordinate and len(coordinate) >= 2:
+                x, y = int(coordinate[0]), int(coordinate[1])
+                _glide(x, y); pyautogui.click()
+                return f"Left clicked at ({x}, {y})"
+            else:
+                pyautogui.click()
+                return "Left clicked at current mouse position"
+
+        elif action == "right_click":
+            if coordinate and len(coordinate) >= 2:
+                x, y = int(coordinate[0]), int(coordinate[1])
+                _glide(x, y); pyautogui.click(button="right")
+                return f"Right clicked at ({x}, {y})"
+            else:
+                pyautogui.click(button="right")
+                return "Right clicked at current mouse position"
+
+        elif action == "double_click":
+            if coordinate and len(coordinate) >= 2:
+                x, y = int(coordinate[0]), int(coordinate[1])
+                _glide(x, y); pyautogui.doubleClick()
+                return f"Double clicked at ({x}, {y})"
+            else:
+                pyautogui.doubleClick()
+                return "Double clicked at current mouse position"
+
+        elif action == "three_click":
+            if coordinate and len(coordinate) >= 2:
+                x, y = int(coordinate[0]), int(coordinate[1])
+                _glide(x, y); pyautogui.tripleClick()
+                return f"Triple clicked at ({x}, {y})"
+            else:
+                pyautogui.tripleClick()
+                return "Triple clicked at current mouse position"
+
+        elif action == "drag_to":
+            if not coordinate or len(coordinate) < 2:
+                return "Error: coordinate [x, y] required for drag_to"
+            x, y = int(coordinate[0]), int(coordinate[1])
+            pyautogui.dragTo(x, y, duration=0.6, tween=_tween) if _tween else pyautogui.dragTo(x, y, duration=0.6)
+            return f"Dragged mouse to ({x}, {y})"
+
+        elif action == "left_click_drag":
+            if not coordinate or len(coordinate) < 2:
+                return "Error: coordinate [x, y] required for left_click_drag"
+            if len(coordinate) >= 4:
+                start_x, start_y, end_x, end_y = [int(c) for c in coordinate[:4]]
+                _glide(start_x, start_y, dur=0.4)
+                pyautogui.dragTo(end_x, end_y, duration=0.6, tween=_tween) if _tween else pyautogui.dragTo(end_x, end_y, duration=0.6)
+                return f"Dragged mouse from ({start_x}, {start_y}) to ({end_x}, {end_y})"
+            else:
+                end_x, end_y = int(coordinate[0]), int(coordinate[1])
+                pyautogui.dragTo(end_x, end_y, duration=0.6, tween=_tween) if _tween else pyautogui.dragTo(end_x, end_y, duration=0.6)
+                return f"Dragged mouse to ({end_x}, {end_y})"
+                
+        elif action == "mouse_down":
+            pyautogui.mouseDown()
+            return "Mouse button pressed down"
+            
+        elif action == "mouse_up":
+            pyautogui.mouseUp()
+            return "Mouse button released"
+            
+        elif action == "scroll":
+            if not text:
+                return "Error: scroll amount (as text e.g. '100' or '-100') required for scroll action"
+            amount = int(text)
+            pyautogui.scroll(amount)
+            return f"Scrolled by {amount}"
+            
+        elif action == "type":
+            if not text:
+                return "Error: text required for type action"
+            # Use clipboard paste — pyautogui.write() only supports ASCII and is
+            # painfully slow.  Clipboard handles all Unicode and is instant.
+            try:
+                import pyperclip
+                pyperclip.copy(text)
+                pyautogui.hotkey('ctrl', 'v')
+                time.sleep(0.05)  # let the paste land
+            except ImportError:
+                # pyperclip not installed — fall back to write() for ASCII
+                pyautogui.write(text, interval=0.02)
+            return f"Typed text: '{text}'"
+            
+        elif action == "key":
+            if not text:
+                return "Error: key (e.g. 'enter', 'backspace', 'ctrl+c', 'win') required for key action"
+            _alias = {"windows": "win", "super": "win", "meta": "win", "cmd": "win", "command": "win",
+                      "return": "enter", "esc": "escape", "del": "delete", "ctlr": "ctrl", "control": "ctrl"}
+            keys = [_alias.get(k.strip().lower(), k.strip().lower()) for k in text.split("+") if k.strip()]
+            if len(keys) > 1:
+                pyautogui.hotkey(*keys)
+                return f"Pressed key combination: {' + '.join(keys)}"
+            else:
+                pyautogui.press(keys[0])
+                return f"Pressed key: {keys[0]}"
+                
+        else:
+            return f"Unknown computer_use action '{action}'. Available: screenshot, mouse_hover, left_click, right_click, double_click, three_click, left_click_drag, drag_to, mouse_down, mouse_up, scroll, type, key."
+            
+    except Exception as e:
+        return f"Error executing computer_use action '{action}': {e}"
+
+
 def run_tool(action: dict) -> str:
     a = action.get("action")
     if a == "shell":
@@ -982,6 +1517,23 @@ def run_tool(action: dict) -> str:
         return tool_office_control(str(action.get("cmd", "")), action.get("agent_id"), action.get("task"))
     if a == "generate_media":
         return tool_generate_media(str(action.get("type", "")), str(action.get("prompt", "")), str(action.get("aspect_ratio", "1:1")))
+    if a == "open_app":
+        return tool_open_app(str(action.get("name", "") or action.get("app", "") or action.get("query", "")))
+    if a == "computer":
+        coord = action.get("coordinate")
+        if isinstance(coord, str):
+            try:
+                coord = json.loads(coord)
+            except Exception:
+                pass
+        if not coord:
+            coord = action.get("coordinates") or action.get("pos")
+        text_val = action.get("text") or action.get("content") or action.get("key")
+        return tool_computer(
+            str(action.get("computer_action", "") or action.get("action_type") or "screenshot"),
+            coord,
+            text_val
+        )
     return ""
 
 
@@ -1012,6 +1564,9 @@ def chat(body: ChatIn):
 
     def gen():
         yield event("start", conversation_id=cid)
+        if cid in _state["cancelled_cids"]:
+            yield event("done")
+            return
         if not llm_available():
             yield event("final", text="Ollama isn't running. Start it with `ollama serve` and pull a model.")
             yield event("done")
@@ -1022,7 +1577,8 @@ def chat(body: ChatIn):
         prompt_vars = {
             "memory": load_memory() or "(nothing yet)",
             "mcp_tools": ("\n" + mcp_tools_text + "\n") if mcp_tools_text else "",
-            "skills": ("\n" + skills_text + "\n") if skills_text else ""
+            "skills": ("\n" + skills_text + "\n") if skills_text else "",
+            "apps": _apps_prompt() or "(app list unavailable)"
         }
         if selected_model == "DocWriter":
             llm_model = _state.get("last_selected_base_model") or resolve_base_model()
@@ -1046,14 +1602,420 @@ def chat(body: ChatIn):
 
         steps = []
         final_text = ""
+        vision_model = resolve_vision_model()
+        _email, _subject, _body = "", "", ""
+
+        # ---- PRE-LOOP: auto-detect "Open <app>" intent and execute open_app ----
+        # Small vision models often ignore the system prompt and jump to left_click
+        # instead of using the open_app tool.  This intercept parses the user message
+        # for phrases like "Open Codex and prompt it to …" and runs open_app + a
+        # screenshot automatically so the model sees the app already on screen.
+        _user_lower = body.message.strip().lower()
+        _open_intent = re.match(r'^(?:open|launch|start|run)\s+(.+)', _user_lower)
+        if _open_intent:
+            if cid in _state["cancelled_cids"]:
+                yield event("done")
+                return
+            
+            _full_text_lower = _open_intent.group(1).strip().rstrip('.,!?')
+            _installed = list_installed_apps()
+            
+            # 1. Try to match the entire phrase (minus prefix) as an installed app
+            _match = (
+                _installed.get(_full_text_lower)
+                or next((v for k, v in _installed.items() if k == _full_text_lower), None)
+            )
+            
+            if _match:
+                _target_app = _match["name"]
+                _prompt_task = ""
+            else:
+                # 2. Try to split by " and " or " to "
+                # We search in the original message to preserve casing of the prompt/task.
+                _split = re.search(r'\s+(?:and|to)\s+(.+)', body.message, re.IGNORECASE)
+                if _split:
+                    _raw_app = body.message[:_split.start()].strip()
+                    # Remove the leading "open/launch/start/run" from app name
+                    _target_app = re.sub(r'^(?:open|launch|start|run)\s+', '', _raw_app, flags=re.IGNORECASE).strip().rstrip('.,!?')
+                    
+                    _task_raw = _split.group(1).strip()
+                    _prompt_task = _task_raw
+                    # Clean task prefix
+                    while True:
+                        _low = _prompt_task.lower()
+                        if _low.startswith("prompt it to "):
+                            _prompt_task = _prompt_task[13:]
+                        elif _low.startswith("prompt to "):
+                            _prompt_task = _prompt_task[10:]
+                        elif _low.startswith("prompt "):
+                            _prompt_task = _prompt_task[7:]
+                        elif _low.startswith("tell it to "):
+                            _prompt_task = _prompt_task[11:]
+                        elif _low.startswith("tell to "):
+                            _prompt_task = _prompt_task[8:]
+                        elif _low.startswith("ask it to "):
+                            _prompt_task = _prompt_task[10:]
+                        elif _low.startswith("ask to "):
+                            _prompt_task = _prompt_task[7:]
+                        elif _low.startswith("type "):
+                            _prompt_task = _prompt_task[5:]
+                        elif _low.startswith("write "):
+                            _prompt_task = _prompt_task[6:]
+                        elif _low.startswith("send "):
+                            _prompt_task = _prompt_task[5:]
+                        elif _low.startswith("message "):
+                            _prompt_task = _prompt_task[8:]
+                        elif _low.startswith("search for "):
+                            _prompt_task = _prompt_task[11:]
+                        elif _low.startswith("search "):
+                            _prompt_task = _prompt_task[7:]
+                        elif _low.startswith("find "):
+                            _prompt_task = _prompt_task[5:]
+                        elif _low.startswith("lookup "):
+                            _prompt_task = _prompt_task[7:]
+                        elif _low.startswith("play "):
+                            _prompt_task = _prompt_task[5:]
+                        else:
+                            break
+                    _prompt_task = _prompt_task.rstrip('.,!?')
+                else:
+                    # Just open the app name matching the rest of user_lower
+                    _target_app = _full_text_lower
+                    _prompt_task = ""
+                
+                _target_low = _target_app.lower()
+                # Check for Gmail first to override local shortcut matching
+                if _target_low == "gmail" or _target_low == "gmail.com":
+                    _email_match = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b', body.message)
+                    if _email_match:
+                        _email = _email_match.group(0)
+                        _subj_match = re.search(r'subject\s+["\']([^"\']+?)["\']', body.message, re.IGNORECASE)
+                        if not _subj_match:
+                            _subj_match = re.search(r'subject\s+([A-Za-z0-9\s_-]+?)(?:\s+(?:saying|about|with\s+body|body|message|and\s+body|to\s+|$))', body.message, re.IGNORECASE)
+                        _subject = _subj_match.group(1).strip() if _subj_match else ""
+
+                        _body_match = re.search(r'(?:saying|about|with\s+body|body|message)\s+["\']?(.+?)["\']?$', body.message, re.IGNORECASE)
+                        if _body_match:
+                            _body = _body_match.group(1).strip()
+                        else:
+                            _post_email = body.message[_email_match.end():].strip()
+                            if _subject:
+                                _post_email = re.sub(r'(?:with\s+)?subject\s+["\']?' + re.escape(_subject) + r'["\']?', '', _post_email, flags=re.IGNORECASE).strip()
+                            _body = re.sub(r'^(?:and|to|saying|about|with|write|body|message|subject)\s+', '', _post_email, flags=re.IGNORECASE).strip()
+
+                        _launch_url = f"https://mail.google.com/mail/?view=cm&fs=1&to={urllib.parse.quote(_email)}"
+                        if _subject:
+                            _launch_url += f"&su={urllib.parse.quote(_subject)}"
+                        if _body:
+                            _launch_url += f"&body={urllib.parse.quote(_body)}"
+                    else:
+                        _launch_url = "https://mail.google.com/mail/?view=cm&fs=1"
+                    _match = {
+                        "name": "Gmail",
+                        "launch": _launch_url,
+                        "kind": "web_app"
+                    }
+                else:
+                    _match = (
+                        _installed.get(_target_low)
+                        or next((v for k, v in _installed.items() if k.startswith(_target_low)), None)
+                        or next((v for k, v in _installed.items() if _target_low in k), None)
+                        or next((v for k, v in _installed.items() if all(w in k for w in _target_low.split())), None)
+                    )
+
+                    # Check if target is a web app fallback or raw URL
+                    _is_web_app = (_target_low in WEB_APPS or _target_low.startswith("http://") or _target_low.startswith("https://") or any(ext in _target_low for ext in (".com", ".org", ".net", ".edu", ".gov")))
+                    if not _match and _is_web_app:
+                        _launch_url = WEB_APPS.get(_target_low) or (
+                            _target_app if (_target_low.startswith("http://") or _target_low.startswith("https://")) else f"https://{_target_low}"
+                        )
+                        _match = {
+                            "name": _target_app.title(),
+                            "launch": _launch_url,
+                            "kind": "web_app"
+                        }
+            if _match:
+                if cid in _state["cancelled_cids"]:
+                    yield event("done")
+                    return
+                # Automatically open the app
+                _glow(True)
+                _open_result = tool_open_app(_match["name"], url=_match.get("launch") if _match.get("kind") == "web_app" else None)
+                steps.append({"kind": "tool", "name": "open_app", "arg": _match["name"], "result": _open_result[:1200]})
+                yield event("tool", name="open_app", arg=_match["name"])
+                yield event("tool_result", name="open_app", result=_open_result[:4000])
+
+                # Wait for the app window to appear, then FORCE maximize it
+                import time as _t
+                import ctypes as _ct
+                _t.sleep(3.0)  # give the app time to launch its window
+                try:
+                    _u32 = _ct.windll.user32
+                    _fg = _u32.GetForegroundWindow()
+                    if _fg:
+                        _u32.ShowWindow(_fg, 3)  # SW_MAXIMIZE = 3
+                        _t.sleep(1.0)  # let the maximize animation finish
+                except Exception:
+                    _t.sleep(1.0)
+
+                # If the user also wanted to prompt/type something, do it ALL
+                # programmatically (vision-model-locate → pyautogui-click-type-enter)
+                # instead of relying on the small model's multi-step loop.
+                _is_spotify = (_match["name"].lower() == "spotify")
+                _is_play = ("play" in body.message.lower())
+                _app_lower = _match["name"].lower()
+                _search_intent = any(w in body.message.lower() for w in ("search", "find", "lookup", "query"))
+
+                # ---- Known app search-shortcut map ----
+                # Many apps have keyboard shortcuts that focus the search bar directly.
+                # This is FAR more reliable than trying to click coordinates from a vision model.
+                _SEARCH_SHORTCUTS = {
+                    "x": "/",              # X/Twitter: '/' focuses search
+                    "twitter": "/",
+                    "youtube": "/",
+                    "slack": "ctrl+k",
+                    "discord": "ctrl+k",
+                    "spotify": "ctrl+k",
+                    "notion": "ctrl+k",
+                    "google chrome": "ctrl+l",
+                    "chrome": "ctrl+l",
+                    "microsoft edge": "ctrl+l",
+                    "edge": "ctrl+l",
+                    "firefox": "ctrl+l",
+                    "brave": "ctrl+l",
+                    "opera": "ctrl+l",
+                }
+
+                if _is_spotify and _is_play:
+                    if cid in _state["cancelled_cids"]:
+                        yield event("done")
+                        return
+                    import pyautogui as _pag
+                    if _prompt_task:
+                        # Use Ctrl+K shortcut to focus Spotify search
+                        yield event("tool", name="computer", arg="key: ctrl+k (focus search)")
+                        _pag.hotkey('ctrl', 'k')
+                        _t.sleep(1.0)
+                        steps.append({"kind": "tool", "name": "computer", "arg": "key", "result": "Focused Spotify search with Ctrl+K"})
+                        yield event("tool_result", name="computer", result="Focused Spotify search bar with Ctrl+K")
+
+                        # Type the song name
+                        yield event("tool", name="computer", arg=f"type: {_prompt_task[:80]}")
+                        _pag.typewrite(_prompt_task, interval=0.02) if _prompt_task.isascii() else _pag.write(_prompt_task)
+                        _t.sleep(0.3)
+                        steps.append({"kind": "tool", "name": "computer", "arg": "type", "result": f"Typed song query: {_prompt_task}"})
+                        yield event("tool_result", name="computer", result=f"Typed song query: {_prompt_task}")
+
+                        # Press enter to search
+                        yield event("tool", name="computer", arg="key: enter")
+                        _pag.press("enter")
+                        _t.sleep(1.5)
+                        steps.append({"kind": "tool", "name": "computer", "arg": "key", "result": "Pressed enter to search"})
+                        yield event("tool_result", name="computer", result="Pressed enter to search")
+
+                        # Down arrow and Enter to play the top result
+                        yield event("tool", name="computer", arg="key: down")
+                        _pag.press("down")
+                        _t.sleep(0.5)
+                        yield event("tool", name="computer", arg="key: enter")
+                        _pag.press("enter")
+                        _t.sleep(1.0)
+                        steps.append({"kind": "tool", "name": "computer", "arg": "play", "result": "Selected top result and played it"})
+                        yield event("tool_result", name="computer", result="Selected top result and played it")
+
+                        # Finalize
+                        _final_obs = _computer_observation("key", "Pressed enter", vision_model)
+                        if _final_obs.get("images"):
+                            yield event("tool_result", name="vision", result=f"👁 screenshot sent to {vision_model}")
+                        messages.append({"role": "assistant", "content": json.dumps({"action": "open_app", "name": _match["name"]})})
+                        messages.append({"role": "user", "content": f"I opened Spotify, searched for \"{_prompt_task}\", and played the top result. Task complete. Confirm to the user."})
+                        messages.append(_final_obs)
+                        _glow(False)
+                    else:
+                        # No query, just play/resume
+                        yield event("tool", name="computer", arg="key: playpause")
+                        _pag.press("playpause")
+                        steps.append({"kind": "tool", "name": "computer", "arg": "playpause", "result": "Pressed playpause to resume playback"})
+                        yield event("tool_result", name="computer", result="Pressed playpause to resume playback")
+
+                        _final_obs = _computer_observation("key", "Pressed playpause", vision_model)
+                        if _final_obs.get("images"):
+                            yield event("tool_result", name="vision", result=f"👁 screenshot sent to {vision_model}")
+                        messages.append({"role": "assistant", "content": json.dumps({"action": "open_app", "name": _match["name"]})})
+                        messages.append({"role": "user", "content": "I opened Spotify and resumed playback. Task complete. Confirm to the user."})
+                        messages.append(_final_obs)
+                        _glow(False)
+
+                elif _prompt_task and vision_model:
+                    if cid in _state["cancelled_cids"]:
+                        yield event("done")
+                        return
+
+                    _skip_auto_type = False
+                    if _match.get("kind") == "web_app" and _match["name"].lower() == "gmail":
+                        _final_text = f"I opened Gmail and prepared the compose window with the recipient '{_email}'."
+                        if _subject:
+                            _final_text += f" Subject: '{_subject}'."
+                        if _body:
+                            _final_text += f" Body: '{_body}'."
+                        _final_text += " As requested, I have not clicked send.\n\nDone."
+                        
+                        _glow(False)
+                        yield event("final", text=_final_text)
+                        conv["messages"].append({"role": "user", "content": body.message})
+                        conv["messages"].append({"role": "assistant", "content": _final_text, "steps": steps})
+                        conv["updated"] = time.time()
+                        save_conv(cid, conv)
+                        yield event("done")
+                        return
+                    else:
+                        # Extract prompt text with original casing
+                        _orig_msg = body.message.strip()
+                        _task_match = re.search(
+                            r'(?:prompt|tell|ask|send|type|message|write|search|find|lookup|play)\s+(?:it\s+)?(?:to\s+)?(?:for\s+)?(.+)',
+                            _orig_msg, re.IGNORECASE
+                        )
+                        _prompt_text = _task_match.group(1).strip().rstrip('.,!?') if _task_match else _prompt_task
+
+                    if not _skip_auto_type:
+                        import pyautogui as _pag
+
+                        # ---------- Strategy 1: keyboard shortcut (instant, reliable) ----------
+                        _shortcut = _SEARCH_SHORTCUTS.get(_app_lower) if _search_intent else None
+                        _used_shortcut = False
+                        if _shortcut:
+                            yield event("tool", name="computer", arg=f"key: {_shortcut} (focus search)")
+                            if '+' in _shortcut:
+                                _pag.hotkey(*_shortcut.split('+'))
+                            else:
+                                _pag.press(_shortcut)
+                            _t.sleep(1.0)
+                            steps.append({"kind": "tool", "name": "computer", "arg": "key", "result": f"Focused search with {_shortcut}"})
+                            yield event("tool_result", name="computer", result=f"Focused search bar with {_shortcut}")
+                            _used_shortcut = True
+
+                        # ---------- Strategy 2: vision-based click (fallback) ----------
+                        if not _used_shortcut:
+                            _b64, _sw, _sh = _capture_screen_b64(width=800)
+                            _input_coords = None
+                            if _b64:
+                                if _search_intent:
+                                    _target_desc = "search input box, search field, or search bar where I can type a search query"
+                                else:
+                                    _target_desc = "text input box, message field, chat input area, or prompt box where I can type a message"
+
+                                _find_msg = [
+                                    {"role": "system", "content": "You are a UI element detector. You will be shown a screenshot. Reply with ONLY a JSON object: {\"x\": <number>, \"y\": <number>} — nothing else."},
+                                    {"role": "user", "content": f"Find the {_target_desc}. Return its CENTER coordinates as {{\"x\": ..., \"y\": ...}}. Reply with ONLY the JSON object, no explanation.", "images": [_b64]}
+                                ]
+                                _coord_resp = llm_chat(_find_msg, vision_model, max_tokens=100)
+                                if _coord_resp:
+                                    try:
+                                        _parsed = _parse_coords(_coord_resp)
+                                        if _parsed:
+                                            _ix, _iy = _parsed
+                                            _sc = _state.get("computer_scale", 1.0) or 1.0
+                                            if _sc != 1.0:
+                                                _ix = int(round(_ix * _sc))
+                                                _iy = int(round(_iy * _sc))
+                                            _input_coords = (_ix, _iy)
+                                    except Exception:
+                                        pass
+
+                            if _input_coords:
+                                if cid in _state["cancelled_cids"]:
+                                    yield event("done")
+                                    return
+                                _ix, _iy = _input_coords
+                                yield event("tool", name="computer", arg=f"left_click ({_ix},{_iy})")
+                                _pag.moveTo(_ix, _iy, duration=0.2)
+                                _pag.click(_ix, _iy)
+                                _t.sleep(0.3)
+                                _pag.click(_ix, _iy)
+                                _t.sleep(0.3)
+                                steps.append({"kind": "tool", "name": "computer", "arg": f"left_click", "result": f"Clicked input field at ({_ix},{_iy})"})
+                                yield event("tool_result", name="computer", result=f"Clicked input field at ({_ix},{_iy})")
+                            else:
+                                # Could not find input field — fall back to model-driven approach
+                                _auto_obs = _computer_observation("open_app", _open_result, vision_model)
+                                if _auto_obs.get("images"):
+                                    yield event("tool_result", name="vision", result=f"👁 screenshot sent to {vision_model}")
+                                _open_json = json.dumps({"action": "open_app", "name": _match["name"]})
+                                messages.append({"role": "assistant", "content": _open_json})
+                                messages.append(_auto_obs)
+                                messages.append({"role": "user", "content":
+                                    f"{_match['name']} is open. Find the input field, click it, "
+                                    f"type \"{_prompt_text}\", and press enter."})
+                                _glow(False)
+                                # Skip to the main loop — don't type below
+                                _prompt_text = None
+
+                        # ---------- Type the query and press enter ----------
+                        if _prompt_text:
+                            yield event("tool", name="computer", arg=f"type: {_prompt_text[:80]}")
+                            _pag.typewrite(_prompt_text, interval=0.02) if _prompt_text.isascii() else _pag.write(_prompt_text)
+                            _t.sleep(0.3)
+                            steps.append({"kind": "tool", "name": "computer", "arg": "type", "result": f"Typed: {_prompt_text}"})
+                            yield event("tool_result", name="computer", result=f"Typed: {_prompt_text}")
+                            # Press enter to send
+                            yield event("tool", name="computer", arg="key: enter")
+                            _pag.press("enter")
+                            _t.sleep(1.0)
+                            steps.append({"kind": "tool", "name": "computer", "arg": "key", "result": "Pressed enter"})
+                            yield event("tool_result", name="computer", result="Pressed enter — sent")
+                            # Take final screenshot to show the result
+                            _final_obs = _computer_observation("key", "Pressed enter", vision_model)
+                            if _final_obs.get("images"):
+                                yield event("tool_result", name="vision", result=f"👁 screenshot sent to {vision_model}")
+                            # Inject all actions into conversation
+                            messages.append({"role": "assistant", "content": json.dumps({"action": "open_app", "name": _match["name"]})})
+                            messages.append({"role": "user", "content":
+                                f"I opened {_match['name']}, maximized it, "
+                                f"typed \"{_prompt_text}\", and pressed enter. "
+                                f"The task is complete. Confirm to the user what was done."})
+                            messages.append(_final_obs)
+                            _glow(False)
+                        else:
+                            # Could not find input field — fall back to model-driven approach
+                            _auto_obs = _computer_observation("open_app", _open_result, vision_model)
+                            if _auto_obs.get("images"):
+                                yield event("tool_result", name="vision", result=f"👁 screenshot sent to {vision_model}")
+                            _open_json = json.dumps({"action": "open_app", "name": _match["name"]})
+                            messages.append({"role": "assistant", "content": _open_json})
+                            messages.append(_auto_obs)
+                            messages.append({"role": "user", "content":
+                                f"{_match['name']} is open. Find the input field, click it, "
+                                f"type \"{_prompt_text}\", and press enter."})
+                else:
+                    # No prompt task — just inject the screenshot for the model
+                    _auto_obs = _computer_observation("open_app", _open_result, vision_model)
+                    if _auto_obs.get("images"):
+                        yield event("tool_result", name="vision", result=f"👁 screenshot sent to {vision_model}")
+                    _open_json = json.dumps({"action": "open_app", "name": _match["name"]})
+                    messages.append({"role": "assistant", "content": _open_json})
+                    messages.append(_auto_obs)
+
         for _ in range(MAX_STEPS):
-            raw = llm_chat(messages, llm_model, max_tokens=2500)
+            if cid in _state["cancelled_cids"]:
+                final_text = "Execution stopped by user."
+                break
+            _prune_old_images(messages)
+            step_model = vision_model if (vision_model and _has_image(messages)) else llm_model
+            if cid in _state["cancelled_cids"]:
+                final_text = "Execution stopped by user."
+                break
+            raw = llm_chat(messages, step_model, max_tokens=(900 if step_model == vision_model else 2500))
+            if cid in _state["cancelled_cids"]:
+                final_text = "Execution stopped by user."
+                break
             if not raw:
                 final_text = "The model did not respond."
                 break
             action = _parse(raw)
             if not action or "action" not in action:
                 final_text = raw.strip()
+                if "done" not in final_text.lower():
+                    final_text = final_text.rstrip() + "\n\nDone."
                 break
             a = action["action"]
             if a == "think":
@@ -1073,15 +2035,15 @@ def chat(body: ChatIn):
                 continue
             if a == "final":
                 final_text = str(action.get("text", ""))
+                if "done" not in final_text.lower():
+                    final_text = final_text.rstrip() + "\n\nDone."
                 break
             if a == "delegate":
-                task = str(action.get("task", ""))
-                yield event("tool", name="delegate", arg=task[:200])
-                result = _run_subagent(task, llm_model, steps)
-                steps.append({"kind": "tool", "name": "delegate", "arg": task[:200], "result": result[:1200]})
-                yield event("tool_result", name="delegate", result=result[:4000])
+                result = "Error: The 'delegate' action is disabled. Do NOT delegate tasks. You must perform all steps directly in the main loop using your own tools (such as 'open_app', 'computer', 'shell', 'read_file', 'write_file', 'list_dir', 'web_search', 'web_fetch')."
+                steps.append({"kind": "tool", "name": "delegate", "arg": "", "result": result})
+                yield event("tool_result", name="delegate", result=result)
                 messages.append({"role": "assistant", "content": raw})
-                messages.append({"role": "user", "content": f"Sub-agent result:\n{result[:6000]}"})
+                messages.append({"role": "user", "content": result})
                 continue
             if a == "canvas":
                 html = str(action.get("html", ""))
@@ -1105,20 +2067,72 @@ def chat(body: ChatIn):
                 messages.append({"role": "assistant", "content": raw})
                 messages.append({"role": "user", "content": f"Skill '{sname}' saved and enabled. Continue."})
                 continue
-            if a in ("shell", "read_file", "write_file", "list_dir", "web_search", "web_fetch", "mcp_tool", "office_control", "generate_media"):
-                label = action.get("command") or action.get("path") or action.get("query") or action.get("url") or action.get("tool") or action.get("cmd") or action.get("prompt") or ""
+            if a in ("shell", "read_file", "write_file", "list_dir", "web_search", "web_fetch", "mcp_tool", "office_control", "generate_media", "computer", "open_app"):
+                if cid in _state["cancelled_cids"]:
+                    final_text = "Execution stopped by user."
+                    break
+                label = action.get("command") or action.get("path") or action.get("query") or action.get("url") or action.get("tool") or action.get("cmd") or action.get("prompt") or action.get("computer_action") or action.get("name") or ""
+
+                # ---- stuck-loop breaker ----
+                # If the agent repeats the exact same action+label 3 times in a row,
+                # inject a corrective message instead of running it again.
+                _sig = f"{a}:{str(label)[:100]}"
+                _recent = [s for s in steps[-6:] if s.get("kind") == "tool"]
+                if len(_recent) >= 2 and all(f"{s['name']}:{s.get('arg','')}" == _sig for s in _recent[-2:]):
+                    messages.append({"role": "assistant", "content": raw})
+                    messages.append({"role": "user", "content":
+                        f"STOP — you have already used {a}('{str(label)[:80]}') multiple times with the same result. "
+                        f"Try a DIFFERENT action. If you are trying to open an app, use the \"open_app\" action. "
+                        f"If you are stuck, use \"think\" to reconsider, or \"final\" to give up."})
+                    steps.append({"kind": "tool", "name": a, "arg": str(label)[:200], "result": "(skipped — loop detected)"})
+                    yield event("tool_result", name=a, result="(skipped — repeated action detected, trying different approach)")
+                    continue
+
+                # ---- web_search → open_app intent intercept ----
+                # If the model web-searches "open <app>" and that app is installed, redirect.
+                if a == "web_search":
+                    _q = str(label).strip().lower()
+                    _open_match = re.match(r'^(?:open|launch|start|run)\s+(.+)', _q)
+                    if _open_match:
+                        _app_name = _open_match.group(1).strip()
+                        _installed = list_installed_apps()
+                        _found = (_installed.get(_app_name)
+                                  or next((v for k, v in _installed.items() if k.startswith(_app_name)), None)
+                                  or next((v for k, v in _installed.items() if _app_name in k), None))
+                        if _found:
+                            # Redirect to open_app instead of web_search
+                            a = "open_app"
+                            action = {"action": "open_app", "name": _found["name"]}
+                            label = _found["name"]
+                            yield event("tool_result", name="web_search", result=f"Redirecting: '{_found['name']}' is installed locally — opening it directly.")
+
+                if a in ("computer", "open_app"):
+                    _glow(True)   # light up the screen edges while controlling the desktop
                 yield event("tool", name=a, arg=str(label)[:200])
+                if cid in _state["cancelled_cids"]:
+                    final_text = "Execution stopped by user."
+                    break
                 result = run_tool(action)
+                if cid in _state["cancelled_cids"]:
+                    final_text = "Execution stopped by user."
+                    break
                 steps.append({"kind": "tool", "name": a, "arg": str(label)[:200], "result": result[:1200]})
                 yield event("tool_result", name=a, result=result[:4000])
                 messages.append({"role": "assistant", "content": raw})
-                messages.append({"role": "user", "content": f"Result of {a}:\n{result[:6000]}"})
+                if a in ("computer", "open_app"):
+                    obs = _computer_observation(str(action.get("computer_action", "") or a), result, vision_model)
+                    if obs.get("images"):
+                        yield event("tool_result", name="vision", result=f"👁 screenshot sent to {vision_model}")
+                    messages.append(obs)
+                else:
+                    messages.append({"role": "user", "content": f"Result of {a}:\n{result[:6000]}"})
                 continue
             final_text = raw.strip()
             break
         else:
             final_text = final_text or "Reached the step limit. Ask me to continue."
 
+        _glow(False)  # done controlling the desktop — fade the edge glow
         yield event("final", text=final_text)
         conv["messages"].append({"role": "user", "content": body.message})
         conv["messages"].append({"role": "assistant", "content": final_text, "steps": steps})
@@ -1128,7 +2142,21 @@ def chat(body: ChatIn):
         save_conv(cid, conv)
         yield event("done")
 
-    return StreamingResponse(gen(), media_type="application/x-ndjson")
+    def gen_guarded():
+        try:
+            yield from gen()
+        finally:
+            _glow(False)  # ensure the glow never lingers if the client disconnects mid-run
+            _state["cancelled_cids"].discard(cid)
+
+    return StreamingResponse(gen_guarded(), media_type="application/x-ndjson")
+
+
+@app.post("/api/chat/stop")
+def stop_chat(body: StopIn):
+    cid = body.conversation_id
+    _state["cancelled_cids"].add(cid)
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------------- conversations
@@ -1328,7 +2356,9 @@ def remote_workspace():
 # --------------------------------------------------------------------------- workspace / memory / models
 @app.get("/api/health")
 def health():
-    return {"ok": True, "llm": llm_available(), "model": resolve_model(), "workspace": str(ws())}
+    return {"ok": True, "llm": llm_available(), "model": resolve_model(), "workspace": str(ws()),
+            "overlay": _overlay is not None, "apps": len(list_installed_apps()),
+            "vision_model": resolve_vision_model()}
 
 
 class ActiveModelIn(BaseModel):
@@ -1460,6 +2490,8 @@ def toggle_connector(cid: str):
     for c in conns:
         if c["id"] == cid:
             c["enabled"] = not c.get("enabled", True)
+            if c["enabled"]:
+                _mcp_tools_cache.pop(c["url"], None)
             _save_connectors(conns)
             return c
     raise HTTPException(404, "connector not found")
@@ -1636,7 +2668,8 @@ def _run_routine_in_background(routine_id: str, cid: str):
         prompt_vars = {
             "memory": load_memory() or "(nothing yet)",
             "mcp_tools": ("\n" + mcp_tools_text + "\n") if mcp_tools_text else "",
-            "skills": ("\n" + skills_text + "\n") if skills_text else ""
+            "skills": ("\n" + skills_text + "\n") if skills_text else "",
+            "apps": _apps_prompt() or "(app list unavailable)"
         }
         
         if selected_model == "DocWriter":
@@ -1658,11 +2691,14 @@ def _run_routine_in_background(routine_id: str, cid: str):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": routine["prompt"]}
         ]
-        
+
         steps = []
         final_text = ""
+        vision_model = resolve_vision_model()
         for _ in range(MAX_STEPS):
-            raw = llm_chat(messages, llm_model, max_tokens=2500)
+            _prune_old_images(messages)
+            step_model = vision_model if (vision_model and _has_image(messages)) else llm_model
+            raw = llm_chat(messages, step_model, max_tokens=(900 if step_model == vision_model else 2500))
             if not raw:
                 final_text = "The model did not respond."
                 break
@@ -1687,18 +2723,24 @@ def _run_routine_in_background(routine_id: str, cid: str):
             if a == "final":
                 final_text = str(action.get("text", ""))
                 break
-            if a in ("shell", "read_file", "write_file", "list_dir", "web_search", "mcp_tool"):
-                label = action.get("command") or action.get("path") or action.get("query") or action.get("tool") or ""
+            if a in ("shell", "read_file", "write_file", "list_dir", "web_search", "mcp_tool", "computer", "open_app"):
+                label = action.get("command") or action.get("path") or action.get("query") or action.get("tool") or action.get("computer_action") or action.get("name") or ""
+                if a in ("computer", "open_app"):
+                    _glow(True)
                 result = run_tool(action)
                 steps.append({"kind": "tool", "name": a, "arg": str(label)[:200], "result": result[:1200]})
                 messages.append({"role": "assistant", "content": raw})
-                messages.append({"role": "user", "content": f"Result of {a}:\n{result[:6000]}"})
+                if a in ("computer", "open_app"):
+                    messages.append(_computer_observation(str(action.get("computer_action", "") or a), result, vision_model))
+                else:
+                    messages.append({"role": "user", "content": f"Result of {a}:\n{result[:6000]}"})
                 continue
             final_text = raw.strip()
             break
         else:
             final_text = final_text or "Reached the step limit."
-            
+
+        _glow(False)
         conv["messages"].append({"role": "user", "content": routine["prompt"]})
         conv["messages"].append({"role": "assistant", "content": final_text, "steps": steps})
         conv["updated"] = time.time()
