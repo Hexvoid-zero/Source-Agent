@@ -103,11 +103,21 @@ async function loadConnectors() {
 async function addConnector() {
   const name = $("connName").value.trim();
   const url = $("connUrl").value.trim();
+  const headersRaw = $("connHeaders").value.trim();
   if (!name || !url) { toast("Name and URL are required"); return; }
+  let headers = null;
+  if (headersRaw) {
+    try {
+      headers = JSON.parse(headersRaw);
+    } catch (e) {
+      toast("Invalid JSON format in headers");
+      return;
+    }
+  }
   try {
-    await api("/connectors", { method: "POST", body: JSON.stringify({ name, url }) });
+    await api("/connectors", { method: "POST", body: JSON.stringify({ name, url, headers }) });
     $("connModal").hidden = true;
-    $("connName").value = ""; $("connUrl").value = "";
+    $("connName").value = ""; $("connUrl").value = ""; $("connHeaders").value = "";
     loadConnectors();
     toast("Connector added successfully");
   } catch (e) {
@@ -610,7 +620,7 @@ document.addEventListener("DOMContentLoaded", () => {
   };
   // Connectors
   $("addConn").onclick = () => ($("connModal").hidden = false);
-  $("connCancel").onclick = () => ($("connModal").hidden = true);
+  $("connCancel").onclick = () => { $("connModal").hidden = true; $("connHeaders").value = ""; };
   $("connSave").onclick = addConnector;
   // Skills
   $("addSkill").onclick = () => ($("skillModal").hidden = false);

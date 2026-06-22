@@ -97,8 +97,9 @@ def _save_connectors(conns: list[dict]) -> None:
 
 # --------------------------------------------------------------------------- MCP client (Streamable HTTP)
 class McpConnection:
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, headers: dict | None = None):
         self.base_url = base_url
+        self.headers = headers or {}
         self.post_url = None
         self.pending_responses = {} # req_id -> response_dict
         self.lock = threading.Lock()
@@ -124,6 +125,8 @@ class McpConnection:
         headers = {
             "Accept": "text/event-stream"
         }
+        if self.headers:
+            headers.update(self.headers)
         try:
             print(f"[Stream] Connecting to SSE stream: {self.base_url}")
             timeout = httpx.Timeout(3.0, read=None)
@@ -183,6 +186,8 @@ class McpConnection:
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream"
         }
+        if self.headers:
+            headers.update(self.headers)
         
         try:
             r = httpx.post(post_target, json=payload, headers=headers, timeout=timeout)
@@ -245,35 +250,37 @@ _mcp_connections = {}
 _mcp_tools_cache = {}
 
 
-def _get_mcp_conn(url: str) -> McpConnection:
+def _get_mcp_conn(url: str, headers: dict | None = None) -> McpConnection:
     if url not in _mcp_connections:
-        _mcp_connections[url] = McpConnection(url)
+        _mcp_connections[url] = McpConnection(url, headers)
+    elif headers is not None:
+        _mcp_connections[url].headers = headers
     return _mcp_connections[url]
 
 
-def _mcp_rpc(url: str, method: str, params: dict | None = None) -> dict | None:
+def _mcp_rpc(url: str, method: str, params: dict | None = None, headers: dict | None = None) -> dict | None:
     """Send a JSON-RPC 2.0 request to an MCP server over Streamable HTTP or SSE."""
-    conn = _get_mcp_conn(url)
+    conn = _get_mcp_conn(url, headers)
     return conn.send_rpc(method, params)
 
 
-def _mcp_initialize(url: str) -> dict | None:
+def _mcp_initialize(url: str, headers: dict | None = None) -> dict | None:
     """Initialize the MCP session and return server info."""
     return _mcp_rpc(url, "initialize", {
         "protocolVersion": "2025-03-26",
         "capabilities": {},
         "clientInfo": {"name": "SourceAgent", "version": "1.0"}
-    })
+    }, headers)
 
 
-def _mcp_list_tools(url: str) -> list[dict]:
+def _mcp_list_tools(url: str, headers: dict | None = None) -> list[dict]:
     """List tools from an MCP server."""
     if url in _mcp_tools_cache:
         return _mcp_tools_cache[url]
     try:
-        _mcp_initialize(url)
+        _mcp_initialize(url, headers)
         # Use a short timeout of 2.0s for tools list so we don't hang if server is slow
-        result = _get_mcp_conn(url).send_rpc("tools/list", timeout=2.0)
+        result = _get_mcp_conn(url, headers).send_rpc("tools/list", timeout=2.0)
         if result and "tools" in result:
             _mcp_tools_cache[url] = result["tools"]
             return result["tools"]
@@ -283,10 +290,10 @@ def _mcp_list_tools(url: str) -> list[dict]:
     return []
 
 
-def _mcp_call_tool(url: str, tool_name: str, arguments: dict) -> str:
+def _mcp_call_tool(url: str, tool_name: str, arguments: dict, headers: dict | None = None) -> str:
     """Call a tool on an MCP server and return the text result."""
-    _mcp_initialize(url)
-    result = _mcp_rpc(url, "tools/call", {"name": tool_name, "arguments": arguments})
+    _mcp_initialize(url, headers)
+    result = _mcp_rpc(url, "tools/call", {"name": tool_name, "arguments": arguments}, headers)
     if result and "content" in result:
         parts = []
         for item in result["content"]:
@@ -373,7 +380,7 @@ def _get_mcp_tools_prompt() -> str:
              "\nAvailable MCP tools:"]
     for c in enabled:
         try:
-            tools = _mcp_list_tools(c["url"])
+            tools = _mcp_list_tools(c["url"], headers=c.get("headers"))
             if tools:
                 lines.append(f"\nConnector: {c['name']} (id: {c['id']})")
                 for t in tools:
@@ -1550,7 +1557,7 @@ def tool_mcp(action: dict) -> str:
         return f"(unknown connector: {connector_id})"
     if not conn.get("enabled", True):
         return f"(connector {conn['name']} is disabled)"
-    return _mcp_call_tool(conn["url"], tool_name, arguments)
+    return _mcp_call_tool(conn["url"], tool_name, arguments, headers=conn.get("headers"))
 
 
 def event(t: str, **kw) -> str:
@@ -2448,6 +2455,7 @@ def list_dirs(path: str = ""):
 class ConnectorIn(BaseModel):
     name: str
     url: str
+    headers: dict | None = None
 
 
 @app.get("/api/connectors")
@@ -2460,11 +2468,11 @@ def add_connector(body: ConnectorIn):
     conns = _load_connectors()
     # Validate by attempting to list tools
     try:
-        tools = _mcp_list_tools(body.url)
+        tools = _mcp_list_tools(body.url, headers=body.headers)
     except Exception as e:
         raise HTTPException(400, f"Could not connect to MCP server: {e}")
     cid = uuid.uuid4().hex[:8]
-    entry = {"id": cid, "name": body.name, "url": body.url, "enabled": True, "tool_count": len(tools)}
+    entry = {"id": cid, "name": body.name, "url": body.url, "headers": body.headers, "enabled": True, "tool_count": len(tools)}
     conns.append(entry)
     _save_connectors(conns)
     return entry

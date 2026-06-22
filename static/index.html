@@ -231,11 +231,12 @@
   </div>
 
   <div class="modal" id="connModal" hidden>
-    <div class="modal-card modal-sm">
+    <div class="modal-card">
       <div class="modal-head">Add MCP Connector</div>
       <div class="modal-body">
         <label>Name<input id="connName" placeholder="e.g. My MCP Server" /></label>
         <label>Server URL<input id="connUrl" placeholder="http://localhost:3000/mcp" /></label>
+        <label>Headers (JSON, optional)<textarea id="connHeaders" rows="3" placeholder='e.g. {"x-consumer-api-key": "your_key"}'></textarea></label>
       </div>
       <div class="modal-foot">
         <span class="spacer"></span>
