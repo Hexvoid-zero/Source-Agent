@@ -4,6 +4,11 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Source Agent</title>
+  <!-- DESIGN.md type voice: slab-serif display (Cormorant ≈ Copernicus) + humanist sans (Inter ≈ StyreneB).
+       Loads when online; falls back to Georgia/system sans offline. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -108,14 +113,14 @@
       <section class="chat" id="chatPage">
         <div class="transcript" id="transcript">
           <div class="empty" id="empty">
-            <div class="empty-mark">☤</div>
-            <h1>Source Agent</h1>
-            <p>A personal AI agent that runs shell commands, edits files, searches the web,
-               and remembers what matters across sessions — all locally via Ollama.</p>
+            <div class="empty-mark">✳</div>
+            <h1>Describe the outcome — Source Agent does the work.</h1>
+            <p>Choose a workspace, describe what you want, and Source Agent plans it, breaks it into
+               steps, and works through them — writing finished files as it goes. All local via Ollama.</p>
             <div class="suggest" id="suggest">
-              <button>List the files in my workspace</button>
-              <button>Create a Python hello-world and run it</button>
-              <button>Search the web for the latest on AI agents</button>
+              <button>Research the top 5 vector databases and write a comparison report</button>
+              <button>Build a budget spreadsheet with formulas from these numbers</button>
+              <button>Organize my workspace files into folders by type</button>
             </div>
           </div>
         </div>

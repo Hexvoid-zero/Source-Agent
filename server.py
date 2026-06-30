@@ -803,7 +803,24 @@ def append_memory(text: str) -> None:
 
 
 # --------------------------------------------------------------------------- tools
-def tool_shell(command: str) -> str:
+# Cowork-style safety: never permanently delete files without explicit user confirmation.
+_DELETE_RE = re.compile(
+    r"(?<![\w-])(rm|rmdir|rd|del|erase|unlink|rimraf|shred)(?![\w-])"
+    r"|remove-item|remove-itemproperty|clear-content"
+    r"|\bformat\b|\bmkfs\b|\bdd\s+if=",
+    re.IGNORECASE,
+)
+
+
+def _is_delete_command(command: str) -> bool:
+    return bool(_DELETE_RE.search(command or ""))
+
+
+def tool_shell(command: str, allow_delete: bool = False) -> str:
+    if not allow_delete and _is_delete_command(command):
+        return ("(blocked — this command deletes files. Source Agent never deletes without the "
+                "user's explicit OK. Ask the user to confirm; if they approve, re-issue with "
+                '"confirm_delete": true.)')
     try:
         p = subprocess.run(command, cwd=str(ws()), shell=True, capture_output=True, text=True, timeout=120)
         out = (p.stdout or "") + (("\n[stderr]\n" + p.stderr) if p.stderr else "")
@@ -942,13 +959,17 @@ You work inside a workspace folder and can take real actions. Respond with EXACT
 {{"action":"canvas","html":"<h1>...</h1> a live HTML canvas the user sees in a side panel (charts, dashboards, previews)"}}
 {{"action":"create_skill","name":"skill-name","content":"SKILL.md markdown to save as a reusable skill for future sessions"}}
 {{"action":"remember","text":"a durable fact about the user or this work, for future sessions"}}
+{{"action":"plan","steps":["short subtask 1","short subtask 2","short subtask 3"]}}
+{{"action":"task_update","index":0,"status":"doing"}}
 {{"action":"computer","computer_action":"screenshot|mouse_hover|left_click|right_click|double_click|three_click|left_click_drag|drag_to|mouse_down|mouse_up|scroll|type|key","coordinate":[x,y],"text":"text to type or key press combos like ctrl+c"}}
 {{"action":"open_app","name":"the installed app's name, e.g. Spotify"}}
 {{"action":"final","text":"your answer to the user, in markdown"}}
- 
+
 Rules:
 - Actually use tools to accomplish the task; never claim you did something you didn't do.
 - Work in small steps and read tool results before the next action.
+- COWORK WORKFLOW — if completing the request will take MORE THAN ONE action (any file creation or edit, research + write-up, spreadsheet, slide deck, organizing/building files, or any multi-step task), your VERY FIRST action MUST be "plan" with 2–7 concrete subtasks. Then work through them IN ORDER: emit {{"action":"task_update","index":N,"status":"doing"}} the moment you START a subtask, and {{"action":"task_update","index":N,"status":"done"}} the moment it is COMPLETE, before moving to the next. Write finished outputs directly to real files in the workspace. Keep going until every subtask is done, then "final". ONLY skip the plan for a pure conversational answer that uses no tools.
+- SUPERVISED DELETION — never permanently delete files without the user's explicit OK. Deleting shell commands are blocked by default; if a step truly needs a deletion, STOP and ask the user in a "final" message, and only after they approve, run it with "confirm_delete": true on the shell action.
 - Use "canvas" to show the user a rich visual (HTML/CSS/SVG/chart) result (e.g. you can take a screenshot and show it in the canvas).
 - Use "computer" to control the REAL desktop: screenshot, move/click the mouse, type, and press keys.
   COMPUTER-USE LOOP: after every "computer" action (and after "open_app") you are sent a FRESH SCREENSHOT — study it, then choose the next action using EXACT pixel coordinates read from that image. ALWAYS take a "screenshot" first to see the screen before clicking. To OPEN an app, ALWAYS use the "open_app" action with the app's name — it launches the real installed app reliably; do NOT guess shell `start` commands. Whenever you open an app (using "open_app"), verify on the next screenshot if it is in full screen (maximized). If it is not full screen, maximize it immediately: either click the window's Maximize button (top-right corner) or use the "key" action with the "win+up" shortcut.
@@ -1507,7 +1528,7 @@ def tool_computer(action: str, coordinate: list[int] = None, text: str = None) -
 def run_tool(action: dict) -> str:
     a = action.get("action")
     if a == "shell":
-        return tool_shell(str(action.get("command", "")))
+        return tool_shell(str(action.get("command", "")), allow_delete=bool(action.get("confirm_delete", False)))
     if a == "read_file":
         return tool_read_file(str(action.get("path", "")))
     if a == "write_file":
@@ -2039,6 +2060,36 @@ def chat(body: ChatIn):
                 yield event("memory", text=txt)
                 messages.append({"role": "assistant", "content": raw})
                 messages.append({"role": "user", "content": "Saved to memory. Continue."})
+                continue
+            if a == "plan":
+                raw_steps = action.get("steps") or []
+                plan_steps = [str(s).strip() for s in raw_steps if str(s).strip()][:8]
+                conv["plan"] = [{"text": s, "status": "todo"} for s in plan_steps]
+                steps.append({"kind": "plan", "steps": plan_steps})
+                yield event("plan", steps=plan_steps)
+                messages.append({"role": "assistant", "content": raw})
+                messages.append({"role": "user", "content": "Plan recorded. Begin subtask 0 — emit task_update doing, then do the work."})
+                continue
+            if a == "task_update":
+                try:
+                    idx = int(action.get("index", -1))
+                except Exception:
+                    idx = -1
+                status = str(action.get("status", "doing")).lower()
+                status = "done" if status.startswith("don") else ("doing" if status.startswith("do") else status)
+                plan = conv.get("plan") or []
+                if not (0 <= idx < len(plan)) and plan:
+                    # small models often omit/garble the index — resolve to the right item
+                    if status == "done":
+                        idx = next((i for i, p in enumerate(plan) if p["status"] != "done"), len(plan) - 1)
+                    else:
+                        idx = next((i for i, p in enumerate(plan) if p["status"] == "todo"), len(plan) - 1)
+                if 0 <= idx < len(plan):
+                    plan[idx]["status"] = status
+                steps.append({"kind": "task_update", "index": idx, "status": status})
+                yield event("task_update", index=idx, status=status)
+                messages.append({"role": "assistant", "content": raw})
+                messages.append({"role": "user", "content": f"Noted subtask {idx} as {status}. Continue."})
                 continue
             if a == "final":
                 final_text = str(action.get("text", ""))

@@ -1,21 +1,69 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Lora:ital,wght@0,400;0,500;0,600;1,400&display=swap');
+
 :root {
-  /* Restyled Warm Cocoa & Charcoal palette */
-  --bg: #1A1614;
-  --panel: #2D2724;
+  /* DESIGN.md — Warm Cocoa & Charcoal palette (dark amber editorial) */
+  --bg: #1A1614;          /* Warm Charcoal */
+  --panel: #2D2724;       /* Deep Cocoa */
   --panel2: #3E3632;
   --edge: #4D433F;
   --edge-soft: #241E1C;
-  --text: #DEDAD6;
+  --text: #FDFCFB;        /* Warm Ivory */
   --text-bright: #FDFCFB;
-  --muted: #8C827D;
-  --accent: #F59E0B;
-  --accent2: #EF4444;
+  --muted: #A39994;
+  --accent: #F59E0B;      /* Amber Gold */
+  --accent2: #EF4444;     /* Crimson */
   --accent-soft: rgba(245, 158, 11, 0.16);
   --green: #F59E0B;
-  --amber: #FCD34D;
+  --amber: #FCD34D;       /* Sun Glow */
   --red: #EF4444;
   --teal: #F59E0B;
+  /* DESIGN.md type voice: serif display + humanist sans */
+  --serif: "Cormorant Garamond", "Tiempos Headline", "Lora", Georgia, "Times New Roman", serif;
+  --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+  /* radius scale */
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+  --r-pill: 9999px;
 }
+
+/* Typography Utility Classes */
+.display-xl {
+  font-family: "Copernicus", "Tiempos Headline", "Lora", Georgia, serif;
+  font-size: 64px;
+  font-weight: 400;
+  line-height: 1.05;
+  letter-spacing: -1.5px;
+}
+.display-lg {
+  font-family: "Copernicus", "Tiempos Headline", "Lora", Georgia, serif;
+  font-size: 48px;
+  font-weight: 400;
+  line-height: 1.1;
+  letter-spacing: -1px;
+}
+.display-md {
+  font-family: "Copernicus", "Tiempos Headline", "Lora", Georgia, serif;
+  font-size: 36px;
+  font-weight: 400;
+  line-height: 1.15;
+  letter-spacing: -0.5px;
+}
+.display-sm {
+  font-family: "Copernicus", "Tiempos Headline", "Lora", Georgia, serif;
+  font-size: 28px;
+  font-weight: 400;
+  line-height: 1.2;
+  letter-spacing: -0.3px;
+}
+.title-lg {
+  font-family: "StyreneB", "Inter", sans-serif;
+  font-size: 22px;
+  font-weight: 500;
+  line-height: 1.3;
+}
+
 @media (prefers-reduced-motion: no-preference) {
   button, .conn, .conn-item, .skill-item, .job, .conv, .msg-user, .tool, .edit-card, .suggest button, .mem-item {
     transition: background .18s ease, border-color .18s ease, transform .12s ease, box-shadow .18s ease, color .18s ease;
@@ -27,7 +75,7 @@
 [hidden] { display: none !important; }
 html, body { height: 100%; overflow: hidden; }
 body {
-  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--sans);
   font-size: 13.5px; color: var(--text); background: var(--bg);
 }
 button { font-family: inherit; color: inherit; background: none; border: none; cursor: pointer; transition: .15s; }
@@ -42,9 +90,9 @@ textarea, select, input { font-family: inherit; color: inherit; background: none
 .topbar { display: flex; align-items: center; justify-content: space-between; padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--edge); }
 .brand { display: flex; align-items: center; gap: 11px; }
 .mark { font-size: 24px; color: var(--accent); text-shadow: 0 0 14px rgba(79,140,255,.5); }
-.brand-name { font-size: 15px; font-weight: 700; letter-spacing: .2px; color: var(--text-bright); }
+.brand-name { font-family: var(--sans); font-size: 16px; font-weight: 600; letter-spacing: .2px; color: var(--text-bright); }
 .brand-name span { color: var(--accent); }
-.brand-sub { font-size: 10.5px; color: var(--muted); letter-spacing: .3px; }
+.brand-sub { font-family: "StyreneB", "Inter", sans-serif; font-size: 10.5px; color: var(--muted); letter-spacing: .3px; }
 .topbar-right { display: flex; align-items: center; gap: 12px; }
 .status { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); }
 .status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
@@ -60,7 +108,7 @@ textarea, select, input { font-family: inherit; color: inherit; background: none
 .new-btn { background: var(--accent); color: #fff; border-radius: 9px; padding: 9px; font-size: 13px; font-weight: 600; }
 .new-btn:hover { filter: brightness(1.08); }
 .side-section { display: flex; flex-direction: column; min-height: 0; }
-.side-head { font-size: 10.5px; text-transform: uppercase; letter-spacing: .7px; color: var(--muted); margin-bottom: 7px; display: flex; justify-content: space-between; align-items: center; }
+.side-head { font-family: "StyreneB", "Inter", sans-serif; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .7px; color: var(--muted); margin-bottom: 7px; display: flex; justify-content: space-between; align-items: center; }
 .side-head button { color: var(--muted); font-size: 12px; padding: 2px 5px; border-radius: 4px; }
 .side-head button:hover { background: rgba(255,255,255,.06); color: var(--text); }
 .conv-list { overflow-y: auto; display: flex; flex-direction: column; gap: 2px; max-height: 34vh; }
@@ -149,10 +197,18 @@ textarea, select, input { font-family: inherit; color: inherit; background: none
 .composer-foot { max-width: 800px; margin: 6px auto 0; font-size: 10.5px; color: var(--muted); text-align: center; }
 
 /* empty state */
-.empty { max-width: 560px; margin: 8vh auto 0; text-align: center; padding: 0 24px; }
-.empty-mark { font-size: 56px; color: var(--accent); text-shadow: 0 0 26px rgba(79,140,255,.5); }
-.empty h1 { font-size: 26px; color: var(--text-bright); margin: 6px 0; font-weight: 600; }
-.empty p { color: var(--muted); line-height: 1.65; font-size: 13.5px; }
+.empty { max-width: 600px; margin: 9vh auto 0; text-align: center; padding: 0 24px; }
+.empty-mark { font-size: 52px; color: var(--accent); text-shadow: 0 0 26px rgba(245,158,11,.45); }
+.empty h1 {
+  font-family: var(--serif);
+  font-size: 46px; /* display-lg, editorial hero */
+  font-weight: 500;
+  line-height: 1.08;
+  letter-spacing: -1px;
+  color: var(--text-bright);
+  margin: 14px 0 10px;
+}
+.empty p { color: var(--muted); line-height: 1.65; font-size: 14.5px; max-width: 480px; margin: 0 auto; }
 .suggest { display: flex; flex-direction: column; gap: 8px; margin-top: 22px; }
 .suggest button { background: var(--panel2); border: 1px solid var(--edge); border-radius: 10px; padding: 11px 14px; font-size: 13px; color: var(--text); text-align: left; }
 .suggest button:hover { border-color: var(--accent); color: var(--text-bright); }
@@ -364,10 +420,13 @@ textarea, select, input { font-family: inherit; color: inherit; background: none
   text-shadow: 0 0 16px rgba(79, 140, 255, 0.3);
 }
 .coder-empty h2 {
-  font-size: 18px;
+  font-family: "Copernicus", "Tiempos Headline", "Lora", Georgia, serif;
+  font-size: 28px; /* display-sm */
+  font-weight: 400;
+  line-height: 1.2;
+  letter-spacing: -0.3px;
   color: var(--text-bright);
-  font-weight: 600;
-  margin-bottom: 4px;
+  margin-bottom: 8px;
 }
 .coder-empty p {
   font-size: 12px;
@@ -387,8 +446,10 @@ textarea, select, input { font-family: inherit; color: inherit; background: none
   background: var(--panel);
 }
 .coder-transcript-header h2 {
-  font-size: 14.5px;
-  font-weight: 600;
+  font-family: "StyreneB", "Inter", sans-serif;
+  font-size: 22px; /* title-lg */
+  font-weight: 500;
+  line-height: 1.3;
   color: var(--text-bright);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -773,8 +834,15 @@ textarea, select, input { font-family: inherit; color: inherit; background: none
   padding: 22px 28px 16px;
   border-bottom: 1px solid var(--edge-soft);
 }
-.rws-head h2 { font-size: 19px; color: var(--text-bright); font-weight: 700; letter-spacing: .2px; }
-.rws-head p { font-size: 12.5px; color: var(--muted); margin-top: 3px; }
+.rws-head h2 {
+  font-family: "Copernicus", "Tiempos Headline", "Lora", Georgia, serif;
+  font-size: 28px; /* display-sm */
+  font-weight: 400;
+  line-height: 1.2;
+  letter-spacing: -0.3px;
+  color: var(--text-bright);
+}
+.rws-head p { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
 .rws-head p strong { color: var(--accent); font-weight: 600; }
 .rws-head-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .rws-refresh-dot {
@@ -889,4 +957,64 @@ textarea, select, input { font-family: inherit; color: inherit; background: none
 .rws-job-time { font-size: 11px; color: var(--muted); flex-shrink: 0; }
 
 #btnRemoteWs .icon { filter: grayscale(.1); }
+
+/* ---------------------------------------------------------------- Cowork plan checklist (DESIGN.md editorial) */
+.plan-card {
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--r-lg);
+  padding: 16px 18px;
+  margin: 10px 0 14px;
+}
+.plan-head {
+  font-family: var(--serif);
+  font-size: 19px;
+  font-weight: 500;
+  letter-spacing: -0.3px;
+  color: var(--text-bright);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.plan-mark { color: var(--accent); font-size: 15px; }
+.plan-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.plan-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  transition: color .2s ease;
+}
+.plan-box {
+  flex-shrink: 0;
+  width: 18px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--edge);
+  margin-top: 1px;
+}
+.plan-item.todo .plan-text { color: var(--muted); }
+.plan-item.doing { color: var(--text-bright); }
+.plan-item.doing .plan-box { color: var(--accent); }
+.plan-item.doing .plan-text { color: var(--text-bright); font-weight: 500; }
+.plan-item.done { color: var(--muted); }
+.plan-item.done .plan-box { color: var(--accent); }
+.plan-item.done .plan-text { color: var(--text); text-decoration: line-through; text-decoration-color: var(--edge); }
+
+/* Editorial badge / pill (DESIGN.md badge-pill + badge-coral) */
+.badge-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; font-weight: 500; letter-spacing: .2px;
+  background: var(--panel2); color: var(--text); border: 1px solid var(--edge);
+  border-radius: var(--r-pill); padding: 3px 11px;
+}
+.badge-amber {
+  background: var(--accent-soft); color: var(--amber);
+  border: 1px solid rgba(245,158,11,.4);
+  text-transform: uppercase; font-size: 11px; letter-spacing: 1.2px;
+}
 

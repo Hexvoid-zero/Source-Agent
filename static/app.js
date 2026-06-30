@@ -447,9 +447,12 @@ async function openConversation(cid) {
 function renderSavedTurn(m) {
   const turn = document.createElement("div"); turn.className = "turn";
   const a = document.createElement("div"); a.className = "assistant";
+  let replayPlan = null;
   for (const s of m.steps || []) {
     if (s.kind === "think") a.appendChild(thinkEl(s.text));
     else if (s.kind === "memory") a.appendChild(memEl(s.text));
+    else if (s.kind === "plan") { replayPlan = planEl(s.steps); a.appendChild(replayPlan); }
+    else if (s.kind === "task_update") { if (replayPlan) updatePlanItem(replayPlan, s.index, s.status); }
     else if (s.kind === "tool") { const t = toolEl(s.name, s.arg); setToolResult(t, s.result); a.appendChild(t); }
   }
   const fin = document.createElement("div"); fin.innerHTML = "<p>" + fmt(m.content) + "</p>"; a.appendChild(fin);
@@ -459,6 +462,23 @@ function renderSavedTurn(m) {
 // --------------------------------------------------------------------------- step elements
 function thinkEl(text) { const d = document.createElement("div"); d.className = "step step-think"; d.textContent = text; return d; }
 function memEl(text) { const d = document.createElement("div"); d.className = "step step-mem"; d.innerHTML = `🧠 <b>Remembered:</b> ${fmt(text)}`; return d; }
+function planEl(steps) {
+  const d = document.createElement("div"); d.className = "plan-card";
+  const esc = (s) => String(s == null ? "" : s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  d.innerHTML = `<div class="plan-head"><span class="plan-mark">✳</span> Plan</div>` +
+    `<ol class="plan-list">` + (steps || []).map((s, i) =>
+      `<li class="plan-item todo" data-i="${i}"><span class="plan-box">○</span><span class="plan-text">${esc(s)}</span></li>`
+    ).join("") + `</ol>`;
+  return d;
+}
+function updatePlanItem(card, index, status) {
+  const li = card.querySelector(`.plan-item[data-i="${index}"]`);
+  if (!li) return;
+  li.classList.remove("todo", "doing", "done");
+  li.classList.add(status === "done" ? "done" : status === "doing" ? "doing" : "todo");
+  const box = li.querySelector(".plan-box");
+  if (box) box.textContent = status === "done" ? "✓" : status === "doing" ? "◐" : "○";
+}
 function toolEl(name, arg) {
   const d = document.createElement("div"); d.className = "step tool";
   d.innerHTML = `<div class="tool-head"><span class="tool-ico">${TOOL_ICON[name] || "▶"}</span>` +
@@ -503,10 +523,13 @@ async function send(text) {
   const t = $("transcript"); t.appendChild(turn); t.scrollTop = t.scrollHeight;
 
   let curTool = null;
+  let curPlan = null;
   const onEvent = (ev) => {
     if (ev.type === "start") { S.cid = ev.conversation_id; }
     else if (ev.type === "think") { working.remove(); a.appendChild(thinkEl(ev.text)); a.appendChild(working); }
     else if (ev.type === "memory") { working.remove(); a.appendChild(memEl(ev.text)); a.appendChild(working); }
+    else if (ev.type === "plan") { working.remove(); curPlan = planEl(ev.steps); a.appendChild(curPlan); a.appendChild(working); }
+    else if (ev.type === "task_update") { if (curPlan) updatePlanItem(curPlan, ev.index, ev.status); }
     else if (ev.type === "tool") { working.remove(); curTool = toolEl(ev.name, ev.arg); a.appendChild(curTool); a.appendChild(working); }
     else if (ev.type === "tool_result") { if (curTool) setToolResult(curTool, ev.result); }
     else if (ev.type === "final") { working.remove(); const f = document.createElement("div"); f.innerHTML = "<p>" + fmt(ev.text) + "</p>"; a.appendChild(f); }
